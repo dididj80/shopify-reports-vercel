@@ -24,149 +24,160 @@ export default async function handler(req, res) {
     }
 
     const url = new URL(req.url, `https://${req.headers.host}`);
-    const period = (url.searchParams.get("period") || "weekly").toLowerCase();
+    // Se passi ?period=... funziona come prima; altrimenti entra in AUTO
+    const qsPeriod = (url.searchParams.get("period") || "").toLowerCase();
 
-    // --- Periodi ---
     const nowLocal = DateTime.now().setZone(TZ);
-    let start, end, rangeLabel;
-    if (period === "daily") {
-      const yEnd = nowLocal.startOf("day").minus({ seconds: 1 });
-      const yStart = yEnd.startOf("day");
-      start = yStart; end = yEnd;
-      rangeLabel = `Ayer ${start.toFormat("dd LLL yyyy")}`;
-    } else if (period === "weekly") {
-      const wEnd = nowLocal.startOf("week").minus({ seconds: 1 });
-      const wStart = wEnd.startOf("week");
-      start = wStart; end = wEnd;
-      rangeLabel = `Semana ${start.toFormat("dd LLL")} – ${end.toFormat("dd LLL yyyy")}`;
-    } else if (period === "monthly") {
-      const mEnd = nowLocal.startOf("month").minus({ seconds: 1 });
-      const mStart = mEnd.startOf("month");
-      start = mStart; end = mEnd;
-      rangeLabel = `Mes ${start.toFormat("LLLL yyyy")}`;
-    } else {
-      return res.status(400).json({ ok: false, error: "Invalid period" });
-    }
-    const startISO = start.toUTC().toISO();
-    const endISO = end.toUTC().toISO();
+    const isMonday = nowLocal.weekday === 1;    // lunedì = 1
+    const isFirstDay = nowLocal.day === 1;      // primo del mese
 
-    // --- Ordini ---
-    const lines = await fetchOrdersWithLines(startISO, endISO);
+    // Helper per inviare uno o più report
+    const runOne = async (p) => {
+      const { start, end, rangeLabel } = computeRange(p, nowLocal);
+      const startISO = start.toUTC().toISO();
+      const endISO = end.toUTC().toISO();
 
-    // --- Aggrega per variante ---
-    const byVariant = new Map();
-    for (const li of lines) {
-      if (!li.variantId) continue;
-      const key = li.variantId;
-      const prev = byVariant.get(key);
-      const unit = li.unitPrice ?? null;
-      const rev = li.lineRevenue ?? 0;
-      if (prev) {
-        prev.soldQty += li.quantity;
-        prev.revenue += rev;
+      const lines = await fetchOrdersWithLines(startISO, endISO);
+
+      const byVariant = new Map();
+      for (const li of lines) {
+        if (!li.variantId) continue;
+        const key = li.variantId;
+        const prev = byVariant.get(key);
+        const unit = li.unitPrice ?? null;
+        const rev = li.lineRevenue ?? 0;
+        if (prev) {
+          prev.soldQty += li.quantity;
+          prev.revenue += rev;
+          if (unit !== null) prev.unitPrice = unit;
+        } else {
+          byVariant.set(key, {
+            variantId: key,
+            productTitle: li.productTitle,
+            variantTitle: li.variantTitle,
+            sku: li.sku || "",
+            soldQty: li.quantity,
+            unitPrice: unit,
+            revenue: rev,
+            inventoryAvailable: null,
+            inventoryIncoming: null,
+            locations: []
+          });
+        }
+      }
+
+      const variantIds = Array.from(byVariant.keys());
+      if (variantIds.length) {
+        const inv = await fetchInventoryForVariants(variantIds);
+        for (const it of inv) {
+          const rec = byVariant.get(it.variantId);
+          if (!rec) continue;
+          rec.inventoryAvailable = it.totalAvailable;
+          rec.inventoryIncoming = it.totalIncoming;
+          rec.locations = it.locations;
+        }
+      }
+
+      const channelTotals = { POS: { qty: 0, revenue: 0 }, ONLINE: { qty: 0, revenue: 0 } };
+      for (const li of lines) {
+        const ch = li.channel;
+        channelTotals[ch].qty += li.quantity;
+        channelTotals[ch].revenue += li.lineRevenue ?? 0;
+      }
+
+      const orderIds = Array.from(new Set(lines.map(l => l.orderId)));
+      const txByOrder = await fetchTransactionsForOrders(orderIds);
+      const paymentTotals = {};
+      for (const li of lines) {
+        const txs = txByOrder[li.orderId] || [];
+        const sum = txs.reduce((s, t) => s + t.amount, 0);
+        if (!sum) {
+          paymentTotals["unknown"] ??= { qty: 0, revenue: 0 };
+          paymentTotals["unknown"].revenue += (li.lineRevenue ?? 0);
+          paymentTotals["unknown"].qty += li.quantity;
+          continue;
+        }
+        for (const t of txs) {
+          const share = t.amount / sum;
+          const revShare = (li.lineRevenue ?? 0) * share;
+          const qtyShare = li.quantity * share;
+          paymentTotals[t.gateway] ??= { qty: 0, revenue: 0 };
+          paymentTotals[t.gateway].revenue += revShare;
+          paymentTotals[t.gateway].qty += qtyShare;
+        }
+      }
+
+      const rows = Array.from(byVariant.values()).sort((a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
+      const totals = {
+        qty: rows.reduce((s, r) => s + r.soldQty, 0),
+        revenue: rows.reduce((s, r) => s + r.revenue, 0)
+      };
+
+      const html = renderEmailHTML({
+        period: p,
+        rangeLabel,
+        rows,
+        totals,
+        channelTotals,
+        paymentTotals,
+        money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n)
+      });
+
+      // invio/dryrun
+      if (process.env.REPORT_DRYRUN === "true") {
+        console.log("=== DRYRUN ===", p, rangeLabel);
+        console.log("Subject:", `Reporte ${periodLabel(p)} — ${rangeLabel}`);
+        console.log("HTML preview:\n", html.substring(0, 500), "...");
       } else {
-        byVariant.set(key, {
-          variantId: key,
-          productTitle: li.productTitle,
-          variantTitle: li.variantTitle,
-          sku: li.sku || "",
-          soldQty: li.quantity,
-          unitPrice: unit,
-          revenue: rev,
-          inventoryAvailable: null,
-          inventoryIncoming: null,
-          locations: []
+        if (!RESEND_KEY) throw new Error("Missing RESEND_API_KEY");
+        const resend = new Resend(RESEND_KEY);
+        await resend.emails.send({
+          from: FROM,
+          to: TO,
+          subject: `Reporte ${periodLabel(p)} — ${rangeLabel}`,
+          html
         });
       }
+      return { period: p, items: rows.length };
+    };
+
+    // Se ?period=... → comportati come prima (singolo report)
+    if (qsPeriod === "daily" || qsPeriod === "weekly" || qsPeriod === "monthly") {
+      const out = await runOne(qsPeriod);
+      return res.status(200).json({ ok: true, mode: "single", ...out });
     }
 
-    // --- Inventario ---
-    const variantIds = Array.from(byVariant.keys());
-    if (variantIds.length) {
-      const inv = await fetchInventoryForVariants(variantIds);
-      for (const it of inv) {
-        const rec = byVariant.get(it.variantId);
-        if (!rec) continue;
-        rec.inventoryAvailable = it.totalAvailable;
-        rec.inventoryIncoming = it.totalIncoming;
-        rec.locations = it.locations;
-      }
-    }
+    // AUTO: sempre il daily; se lunedì aggiungi weekly; se giorno 1 aggiungi monthly
+    const results = [];
+    results.push(await runOne("daily"));
+    if (isMonday) results.push(await runOne("weekly"));
+    if (isFirstDay) results.push(await runOne("monthly"));
 
-    // --- Totali POS vs Online ---
-    const channelTotals = { POS: { qty: 0, revenue: 0 }, ONLINE: { qty: 0, revenue: 0 } };
-    for (const li of lines) {
-      const ch = li.channel;
-      channelTotals[ch].qty += li.quantity;
-      channelTotals[ch].revenue += li.lineRevenue ?? 0;
-    }
-
-    // --- Metodi di pagamento ---
-    const orderIds = Array.from(new Set(lines.map(l => l.orderId)));
-    const txByOrder = await fetchTransactionsForOrders(orderIds);
-    const paymentTotals = {};
-    for (const li of lines) {
-      const txs = txByOrder[li.orderId] || [];
-      const sum = txs.reduce((s, t) => s + t.amount, 0);
-      if (!sum) {
-        paymentTotals["unknown"] ??= { qty: 0, revenue: 0 };
-        paymentTotals["unknown"].revenue += (li.lineRevenue ?? 0);
-        paymentTotals["unknown"].qty += li.quantity;
-        continue;
-      }
-      for (const t of txs) {
-        const share = t.amount / sum;
-        const revShare = (li.lineRevenue ?? 0) * share;
-        const qtyShare = li.quantity * share;
-        paymentTotals[t.gateway] ??= { qty: 0, revenue: 0 };
-        paymentTotals[t.gateway].revenue += revShare;
-        paymentTotals[t.gateway].qty += qtyShare;
-      }
-    }
-
-    // --- Ordina righe ---
-    const rows = Array.from(byVariant.values()).sort((a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
-
-    // --- Totali globali ---
-    const totalQty = rows.reduce((s, r) => s + r.soldQty, 0);
-    const totalRev = rows.reduce((s, r) => s + r.revenue, 0);
-
-    // --- Email HTML ---
-    const html = renderEmailHTML({
-      period,
-      rangeLabel,
-      rows,
-      totals: { qty: totalQty, revenue: totalRev },
-      channelTotals,
-      paymentTotals,
-      money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n)
-    });
-
-    // --- Dry-run toggle ---
-    if (process.env.REPORT_DRYRUN === "true") {
-      console.log("=== DRYRUN ATTIVO ===");
-      console.log("Subject:", `Reporte ${periodLabel(period)} — ${rangeLabel}`);
-      console.log("From:", FROM, "To:", TO);
-      console.log("HTML preview:\n", html.substring(0, 800), "...");
-    } else {
-      if (!RESEND_KEY) {
-        return res.status(400).json({ ok: false, error: "Missing RESEND_API_KEY" });
-      }
-      const resend = new Resend(RESEND_KEY);
-      await resend.emails.send({
-        from: FROM,
-        to: TO,
-        subject: `Reporte ${periodLabel(period)} — ${rangeLabel}`,
-        html
-      });
-    }
-
-    return res.status(200).json({ ok: true, period, range: { startISO, endISO }, items: rows.length });
+    return res.status(200).json({ ok: true, mode: "auto", results });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
+
+// Utility per calcolare gli intervalli dei periodi
+function computeRange(period, nowLocal) {
+  if (period === "daily") {
+    const yEnd = nowLocal.startOf("day").minus({ seconds: 1 });
+    const yStart = yEnd.startOf("day");
+    return { start: yStart, end: yEnd, rangeLabel: `Ayer ${yStart.toFormat("dd LLL yyyy")}` };
+  }
+  if (period === "weekly") {
+    const wEnd = nowLocal.startOf("week").minus({ seconds: 1 });
+    const wStart = wEnd.startOf("week");
+    return { start: wStart, end: wEnd, rangeLabel: `Semana ${wStart.toFormat("dd LLL")} – ${wEnd.toFormat("dd LLL yyyy")}` };
+  }
+  // monthly
+  const mEnd = nowLocal.startOf("month").minus({ seconds: 1 });
+  const mStart = mEnd.startOf("month");
+  return { start: mStart, end: mEnd, rangeLabel: `Mes ${mStart.toFormat("LLLL yyyy")}` };
+}
+
 
 function periodLabel(p) { return p === "daily" ? "diario" : p === "weekly" ? "semanal" : "mensual"; }
 
