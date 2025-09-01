@@ -1,10 +1,10 @@
 // /api/sales-report.js
 // Report vendite Shopify (daily/weekly/monthly)
 // - Tabella vendite per prodotto (Inventario + En camino)
-// - Riordini consigliati (velocità su lookback, coverage, ROP, Target, qty consigliata)
+// - Riordini consigliati (velocità lookback, coverage, ROP, Target, qty consigliata)
 // - Metodi di pagamento (con “Pago Mixto”)
 // - Grafici a torta in fondo (POS vs Online, Metodi di pagamento)
-// - ?preview=1 => mostra HTML; ?debug=1 => blocco debug incoming
+// - ?preview=1 => mostra HTML; ?debug=1 => blocco debug incoming; ?no_loc=1 => disabilita filtro per location_ids
 
 import { DateTime } from "luxon";
 import { Resend } from "resend";
@@ -26,8 +26,9 @@ const REORDER_SAFETY_DAYS   = Number(process.env.REORDER_SAFETY_DAYS   || 3);
 const REORDER_REVIEW_DAYS   = Number(process.env.REORDER_REVIEW_DAYS   || 7);
 const REORDER_MIN_QTY       = Number(process.env.REORDER_MIN_QTY       || 1);
 
-const REST_INV_VERSION = process.env.SHOPIFY_REST_INV_VERSION || "2024-07";
+// API versions
 const SHOPIFY_GRAPHQL = `https://${SHOP}/admin/api/2024-10/graphql.json`;
+const REST_INV_VERSION = process.env.SHOPIFY_REST_INV_VERSION || "2024-07"; // per inventory_levels/locations (incoming visibile)
 
 // ===================================================================
 // Handler
@@ -38,14 +39,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok:false, error:"Missing env vars (SHOPIFY_SHOP, SHOPIFY_ADMIN_TOKEN, REPORT_TO_EMAIL, REPORT_FROM_EMAIL)" });
     }
 
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const PERIOD = (url.searchParams.get("period") || "weekly").toLowerCase();
+    const url = new URL(req.url, `https://${req.headers.host]}`);
+    const PERIOD  = (url.searchParams.get("period") || "weekly").toLowerCase();
     const PREVIEW = url.searchParams.get("preview") === "1";
-    const DEBUG = url.searchParams.get("debug") === "1";
+    const DEBUG   = url.searchParams.get("debug") === "1";
+    const NO_LOC  = url.searchParams.get("no_loc") === "1"; // forza senza location_ids
 
     const nowLocal = DateTime.now().setZone(TZ);
 
-    // 1) Range del periodo
+    // 1) Range
     const { start, end, rangeLabel } = computeRange(PERIOD, nowLocal);
     const startISO = start.toUTC().toISO();
     const endISO   = end.toUTC().toISO();
@@ -77,27 +79,24 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4) Inventario on-hand + Incoming (inventory levels)
+    // 4) Inventario on-hand + Incoming
     const variantIds = Array.from(byVariant.keys()).filter(k => !(k.startsWith("SKU:") || k.startsWith("NAME:")));
     let debugIncoming = null;
 
     if (variantIds.length) {
-      // On-hand totale per variante
+      // on-hand totale
       const inv = await fetchInventoryForVariants(variantIds);
       for (const v of inv) {
         const rec = byVariant.get(v.variantId);
         if (rec) rec.inventoryAvailable = v.totalAvailable;
       }
-
-      // InventoryItemId (GID) per variante, poi incoming via REST
+      // incoming reale via REST
       const itemMap = await fetchInventoryItemIds(variantIds);
-      const incomingByVar = await fetchIncomingForInventoryItems(itemMap); // somma su tutte le location
-
+      const incomingByVar = await fetchIncomingForInventoryItems(itemMap, { noLoc: NO_LOC, debug: DEBUG });
       for (const [variantId, incoming] of Object.entries(incomingByVar)) {
         const rec = byVariant.get(variantId);
         if (rec) rec.inventoryIncoming = incoming;
       }
-
       if (DEBUG) {
         debugIncoming = Object.entries(itemMap).map(([variantId, itemGid]) => {
           const num = String(itemGid).split("/").pop();
@@ -112,7 +111,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 5) Lookback vendite per velocità
+    // 5) Lookback per velocità
     const lookStartISO = end.minus({ days: REORDER_LOOKBACK_DAYS }).toUTC().toISO();
     const lookLines = await fetchOrdersWithLines(lookStartISO, endISO);
     const lookByVariant = new Map();
@@ -121,7 +120,7 @@ export default async function handler(req, res) {
       lookByVariant.set(key, (lookByVariant.get(key) || 0) + (li.quantity || 0));
     }
 
-    // 6) Canali + Metodi pagamento
+    // 6) Canali e pagamenti
     const channelTotals = { POS:{ qty:0, revenue:0 }, ONLINE:{ qty:0, revenue:0 } };
     for (const li of lines) {
       channelTotals[li.channel].qty += li.quantity;
@@ -146,8 +145,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // 7) Righe ordinate + totali
-    const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
+    // 7) Ordinamento e totali
+    const rows = Array.from(byVariant.values()).sort((a,b)=> b.soldQty - a.soldQty || b.revenue - a.revenue);
     const totals = { qty: rows.reduce((s,r)=>s+r.soldQty,0), revenue: rows.reduce((s,r)=>s+r.revenue,0) };
 
     // 8) Riordini consigliati
@@ -163,6 +162,7 @@ export default async function handler(req, res) {
       channelTotals,
       paymentTotals,
       debugIncoming,
+      debugMeta: { REST_INV_VERSION, NO_LOC },
       money: (n) => new Intl.NumberFormat(LOCALE, { style:"currency", currency:CURRENCY }).format(n)
     });
 
@@ -215,7 +215,7 @@ function periodLabel(p) {
 }
 
 // ===================================================================
-// Shopify fetch helpers
+// Shopify helpers
 // ===================================================================
 async function shopifyGraphQL(query, variables) {
   const res = await fetch(SHOPIFY_GRAPHQL, {
@@ -332,47 +332,73 @@ async function fetchInventoryItemIds(variantIds) {
   return map;
 }
 
-// ID numerici delle location
+// ID numerici delle location (REST "vecchio" per compatibilità incoming)
 async function fetchLocationIds() {
-  //const url = `https://${SHOP}/admin/api/2024-10/locations.json`;
   const url = `https://${SHOP}/admin/api/${REST_INV_VERSION}/locations.json`;
   const res = await fetch(url, { headers:{ "X-Shopify-Access-Token": TOKEN } });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    console.warn("locations.json error", res.status, await res.text());
+    return [];
+  }
   const json = await res.json();
   return (json.locations || []).map(l => String(l.id));
 }
 
-// Somma "incoming" per inventory_item_ids, filtrando per location_ids
-async function fetchIncomingForInventoryItems(variantIdToItemId) {
+// Somma "incoming" per inventory_item_ids via REST.
+// - usa REST_INV_VERSION (es. 2024-07) perché le versioni più nuove non espongono 'incoming'
+// - se { noLoc:true } non filtra per location_ids
+// - se con il filtro per location otteniamo tutti zeri, riprova senza filtro (fallback)
+async function fetchIncomingForInventoryItems(variantIdToItemId, { noLoc = false, debug = false } = {}) {
+  // 1) GID -> numerico
   const reverse = {};
   const numericItemIds = [];
   for (const [variantId, itemGid] of Object.entries(variantIdToItemId)) {
-    const num = String(itemGid).split("/").pop(); // da GID a numerico
+    const num = String(itemGid).split("/").pop();
     reverse[num] = variantId;
     numericItemIds.push(num);
   }
-  const out = {};
-  if (!numericItemIds.length) return out;
 
-  const locs = await fetchLocationIds();
-  const locParam = locs.length ? `&location_ids=${encodeURIComponent(locs.join(","))}` : "";
+  const queryOnce = async (useLocationFilter) => {
+    const out = {};
+    const locs = useLocationFilter ? await fetchLocationIds() : [];
+    const locParam = (useLocationFilter && locs.length)
+      ? `&location_ids=${encodeURIComponent(locs.join(","))}`
+      : "";
 
-  for (let i=0; i<numericItemIds.length; i+=50) {
-    const ids = numericItemIds.slice(i, i+50);
-    //const url = `https://${SHOP}/admin/api/2024-10/inventory_levels.json?inventory_item_ids=${encodeURIComponent(ids.join(","))}${locParam}`;
-    const url = `https://${SHOP}/admin/api/${REST_INV_VERSION}/inventory_levels.json?inventory_item_ids=${encodeURIComponent(ids.join(","))}${locParam}`;
+    for (let i = 0; i < numericItemIds.length; i += 50) {
+      const ids = numericItemIds.slice(i, i + 50);
+      const url = `https://${SHOP}/admin/api/${REST_INV_VERSION}/inventory_levels.json?inventory_item_ids=${encodeURIComponent(ids.join(","))}${locParam}`;
+      const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
+      if (!res.ok) {
+        console.warn("inventory_levels error", res.status, await res.text());
+        continue;
+      }
+      const json = await res.json();
+      for (const L of (json.inventory_levels || [])) {
+        const itemNum = String(L.inventory_item_id);
+        const variantId = reverse[itemNum];
+        if (!variantId) continue;
+        const incoming = Number(L.incoming || 0);
+        out[variantId] = (out[variantId] || 0) + incoming;
+      }
+    }
+    return out;
+  };
 
-    const res = await fetch(url, { headers:{ "X-Shopify-Access-Token": TOKEN } });
-    if (!res.ok) continue;
-    const json = await res.json();
-    for (const lvl of (json.inventory_levels || [])) {
-      const itemNum = String(lvl.inventory_item_id);
-      const variantId = reverse[itemNum];
-      if (!variantId) continue;
-      out[variantId] = (out[variantId] || 0) + Number(lvl.incoming || 0);
+  // prima prova: con location_ids (a meno di noLoc)
+  let totals = await queryOnce(!noLoc);
+
+  // fallback: se è tutto zero e abbiamo usato il filtro, riprova senza filtro
+  if (!noLoc) {
+    const hasKeys = Object.keys(totals).length > 0;
+    const allZero = hasKeys && Object.values(totals).every(v => (Number(v) || 0) === 0);
+    if (allZero) {
+      if (debug) console.warn("incoming: fallback senza location_ids");
+      totals = await queryOnce(false);
     }
   }
-  return out;
+
+  return totals;
 }
 
 // Transazioni per ordine (per gateway/misto)
@@ -403,7 +429,7 @@ function computeReorder(rows, lookByVariant) {
   const need = [];
 
   for (const r of rows) {
-    if (!r.variantId) continue; // senza variant non abbiamo on_hand certo
+    if (!r.variantId) continue;
 
     const key = r.variantId || (r.sku ? `SKU:${r.sku}` : `NAME:${r.productTitle}__${r.variantTitle}`);
     const soldLook = lookByVariant.get(key) || 0;
@@ -434,7 +460,6 @@ function computeReorder(rows, lookByVariant) {
     }
   }
 
-  // prima quelli che finiscono prima
   need.sort((a,b) => a.coverage - b.coverage);
   return need;
 }
@@ -442,7 +467,7 @@ function computeReorder(rows, lookByVariant) {
 // ===================================================================
 // Email rendering
 // ===================================================================
-function renderEmailHTML({ period, rangeLabel, rows, totals, reorder, channelTotals, paymentTotals, debugIncoming, money }) {
+function renderEmailHTML({ period, rangeLabel, rows, totals, reorder, channelTotals, paymentTotals, debugIncoming, debugMeta, money }) {
   const style = `
   <style>
     body{font-family:Inter,Arial,sans-serif;color:#111}
@@ -463,7 +488,7 @@ function renderEmailHTML({ period, rangeLabel, rows, totals, reorder, channelTot
   const reorderBlock = renderReorderBlock(reorder);
   const paymentsTable = renderPaymentsTable(paymentTotals, money);
   const chartsBlock = renderAllDonuts(channelTotals, paymentTotals);
-  const debugBlock = renderDebugIncoming(debugIncoming);
+  const debugBlock = renderDebugIncoming(debugIncoming, debugMeta);
 
   return `<!doctype html><html><head>${style}</head><body>
     ${header}
@@ -585,8 +610,10 @@ function renderAllDonuts(channelTotals, paymentTotals) {
   return `<h3>Gráficos</h3>${donutQtyChannel}${donutRevChannel}${donutRevPay}${donutQtyPay}`;
 }
 
-function renderDebugIncoming(debugIncoming) {
-  if (!debugIncoming || !debugIncoming.length) return "";
+function renderDebugIncoming(debugIncoming, debugMeta) {
+  if (!debugIncoming) return "";
+  const info = `<p class="muted">REST version: ${escapeHtml(debugMeta.REST_INV_VERSION)} • Location filter: ${debugMeta.NO_LOC ? "OFF" : "ON (con fallback)"}</p>`;
+  if (!debugIncoming.length) return info;
   const rows = debugIncoming.map(d => `
     <tr>
       <td>${escapeHtml(d.product)}</td>
@@ -597,6 +624,7 @@ function renderDebugIncoming(debugIncoming) {
     </tr>`).join("");
   return `
     <h3>DEBUG Incoming (solo con ?debug=1)</h3>
+    ${info}
     <table>
       <thead><tr>
         <th align="left">Prodotto</th>
