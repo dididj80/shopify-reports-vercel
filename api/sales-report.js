@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok:false, error:"Missing env vars (SHOPIFY_SHOP, SHOPIFY_ADMIN_TOKEN, REPORT_TO_EMAIL, REPORT_FROM_EMAIL)" });
     }
 
-    const url = new URL(req.url, `https://${req.headers.host]}`);
+    const url = new URL(req.url, `https://${req.headers.host}`);
     const PERIOD  = (url.searchParams.get("period") || "weekly").toLowerCase();
     const PREVIEW = url.searchParams.get("preview") === "1";
     const DEBUG   = url.searchParams.get("debug") === "1";
