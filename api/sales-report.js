@@ -14,6 +14,7 @@ const TO = process.env.REPORT_TO_EMAIL;
 const FROM = process.env.REPORT_FROM_EMAIL;
 const CURRENCY = process.env.REPORT_CURRENCY || "MXN";
 const LOCALE = process.env.REPORT_LOCALE || "es-MX";
+// Fuso corretto per te
 const TZ = "America/Monterrey";
 
 const SHOPIFY_GRAPHQL = `https://${SHOP}/admin/api/2024-10/graphql.json`;
@@ -99,23 +100,27 @@ export default async function handler(req, res) {
         channelTotals[ch].revenue += li.lineRevenue ?? 0;
       }
 
-      // 5) Metodi di pagamento (ripartizione proporzionale)
+      // 5) Metodi di pagamento
+      //   >>> NUOVA LOGICA: se un ordine ha >1 gateway => "mixto"
       const orderIds = Array.from(new Set(lines.map(l => l.orderId)));
       const txByOrder = await fetchTransactionsForOrders(orderIds);
       const paymentTotals = {}; // gateway -> { qty, revenue }
       for (const li of lines) {
         const txs = txByOrder[li.orderId] || [];
-        const sum = txs.reduce((s, t) => s + t.amount, 0);
-        if (!sum) {
+        if (txs.length === 0) {
           (paymentTotals["unknown"] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
           paymentTotals["unknown"].revenue += (li.lineRevenue ?? 0);
           continue;
         }
-        for (const t of txs) {
-          const share = t.amount / sum;
-          (paymentTotals[t.gateway] ??= { qty: 0, revenue: 0 }).qty += li.quantity * share;
-          paymentTotals[t.gateway].revenue += (li.lineRevenue ?? 0) * share;
+        if (txs.length > 1) {
+          (paymentTotals["mixto"] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
+          paymentTotals["mixto"].revenue += (li.lineRevenue ?? 0);
+          continue;
         }
+        // Caso singolo gateway
+        const t = txs[0];
+        (paymentTotals[t.gateway] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
+        paymentTotals[t.gateway].revenue += (li.lineRevenue ?? 0);
       }
 
       // 6) Ordinamento righe per vendite poi revenue
@@ -478,6 +483,9 @@ function gatewayLabel(key) {
     "pos": "POS (Tarjeta)",
     "shopify_payments": "Shopify Payments",
     "paypal": "PayPal",
+    "fiserv": "Fiserv POS",
+    "external_fiserv": "Fiserv POS",
+    "mixto": "Pago Mixto",
     "unknown": "Desconocido"
   };
   return map[key] || key;
@@ -519,7 +527,7 @@ function svgDonut(segments, title) {
     <svg width="140" height="140" viewBox="0 0 100 100" style="transform:rotate(-90deg);">
       <circle r="${radius}" cx="50" cy="50" fill="transparent" stroke="#E5E7EB" stroke-width="16"/>
       ${rings}
-      <circle r="28" cx="50" cy="50" fill="white"/>
+      <circle r="${radius - 12}" cx="50" cy="50" fill="white"/>
       <text x="50" y="47" text-anchor="middle" font-size="7" fill="#111"
         style="transform:rotate(90deg);transform-origin:50px 50px;">${escapeHtml(title)}</text>
       <text x="50" y="58" text-anchor="middle" font-size="7" fill="#6B7280"
