@@ -363,38 +363,6 @@ async function fetchInventoryItemIds(variantIds) {
   return map; // { variantGID: inventoryItemGID }
 }
 
-// Somma "incoming" per inventory_item_ids via REST
-async function fetchIncomingForInventoryItems(variantIdToItemId) {
-  const itemIds = Object.values(variantIdToItemId);
-  const out = {}; // variantId -> incoming totale
-  if (!itemIds.length) return out;
-
-  const chunks = [];
-  for (let i = 0; i < itemIds.length; i += 50) chunks.push(itemIds.slice(i, i + 50));
-
-  for (const ids of chunks) {
-    const qs = encodeURIComponent(ids.join(","));
-    const url = `https://${SHOP}/admin/api/2024-10/inventory_levels.json?inventory_item_ids=${qs}`;
-    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
-    if (!res.ok) continue;
-    const json = await res.json();
-    const levels = json.inventory_levels || [];
-    // costruiamo reverse: inventoryItemId -> totale incoming
-    const byItem = {};
-    for (const L of levels) {
-      const item = L.inventory_item_id;
-      const incoming = Number(L.incoming || 0);
-      byItem[item] = (byItem[item] || 0) + incoming;
-    }
-    // rimappa a variantId
-    for (const [variantId, itemId] of Object.entries(variantIdToItemId)) {
-      if (byItem[itemId] != null) out[variantId] = byItem[itemId];
-    }
-  }
-  return out;
-}
-
-// Transazioni per ordine (REST)
 // Somma "incoming" per inventory_item_ids via REST (usa ID NUMERICI)
 async function fetchIncomingForInventoryItems(variantIdToItemId) {
   // reverse: numeric_item_id -> variantId
@@ -438,6 +406,35 @@ async function fetchIncomingForInventoryItems(variantIdToItemId) {
   return out;
 }
 
+// Transazioni per ordine (REST)
+async function fetchTransactionsForOrders(orderGids) {
+  const result = {};
+  const concurrency = 5;
+  const queue = [...orderGids];
+
+  const workers = Array.from({ length: concurrency }, () => (async () => {
+    while (queue.length) {
+      const gid = queue.shift();
+      const numericId = String(gid).split("/").pop();
+      const url = `https://${SHOP}/admin/api/2024-10/orders/${numericId}/transactions.json`;
+      try {
+        const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
+        if (!res.ok) { result[gid] = []; continue; }
+        const json = await res.json();
+        const txs = (json.transactions || [])
+          .filter(t => t.status === "success")
+          .map(t => ({ gateway: String(t.gateway || "unknown"), amount: Number(t.amount || 0) }))
+          .filter(t => t.amount > 0);
+        result[gid] = txs;
+      } catch {
+        result[gid] = [];
+      }
+    }
+  })());
+
+  await Promise.all(workers);
+  return result;
+}
 
 async function shopifyGraphQL(query, variables) {
   const res = await fetch(SHOPIFY_GRAPHQL, {
