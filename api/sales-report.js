@@ -1,14 +1,4 @@
 // /api/sales-report.js
-// Report vendite Shopify (daily/weekly/monthly)
-// - Tabella vendite per prodotto (Inventario + En camino)
-// - Riordini consigliati (velocità lookback, coverage, ROP, Target, qty consigliata)
-// - Metodi di pagamento (con “Pago Mixto”)
-// - Grafici a torta in fondo (POS vs Online, Metodi di pagamento)
-// - ?preview=1 => mostra HTML (non invia email)
-// - ?debug=1   => blocco debug incoming
-// - ?today=1   => giorno corrente (parziale)
-// - ?current=1 => settimana/mese correnti (parziali)
-
 import { DateTime } from "luxon";
 import { Resend } from "resend";
 
@@ -20,6 +10,7 @@ const RESEND_KEY = process.env.RESEND_API_KEY;
 const TO   = process.env.REPORT_TO_EMAIL;
 const FROM = process.env.REPORT_FROM_EMAIL;
 
+// Formattazioni
 const CURRENCY = process.env.REPORT_CURRENCY || "MXN";
 const LOCALE   = process.env.REPORT_LOCALE   || "es-MX";
 const TZ       = "America/Monterrey";
@@ -40,12 +31,8 @@ const REST_URL = (p) => `https://${SHOP}/admin/api/2024-07${p}`;
 // ===================================================================
 export default async function handler(req, res) {
   try {
-    if (!SHOP || !TOKEN || !TO || !FROM) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Missing env vars (SHOPIFY_SHOP, SHOPIFY_ADMIN_TOKEN, REPORT_TO_EMAIL, REPORT_FROM_EMAIL)",
-      });
+    if (!SHOP || !TOKEN) {
+      return res.status(400).json({ ok:false, error:"Missing SHOPIFY_SHOP / SHOPIFY_ADMIN_TOKEN" });
     }
 
     const url = new URL(req.url, `https://${req.headers.host}`);
@@ -94,7 +81,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4) Inventario on-hand + Incoming (Purchase Orders; fallback Transfers)
+    // 4) Inventario on-hand + Incoming (PO → fallback Transfers)
     const variantIds = Array.from(byVariant.keys()).filter(
       (k) => !(k.startsWith("SKU:") || k.startsWith("NAME:"))
     );
@@ -102,15 +89,13 @@ export default async function handler(req, res) {
     let debugIncoming = null;
 
     if (variantIds.length) {
-      // on-hand totale per variante (GraphQL)
       const inv = await fetchInventoryForVariants(variantIds);
       for (const v of inv) {
         const rec = byVariant.get(v.variantId);
         if (rec) rec.inventoryAvailable = v.totalAvailable;
       }
 
-      // variantId -> inventoryItemId (numerico) per PO/Transfers
-      const itemGids = await fetchInventoryItemIds(variantIds); // GIDs
+      const itemGids = await fetchInventoryItemIds(variantIds);
       const itemNums = Object.fromEntries(
         Object.entries(itemGids).map(([vid, gid]) => [vid, gid.split("/").pop()])
       );
@@ -154,7 +139,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 5) Lookback (per velocità di vendita)
+    // 5) Lookback per velocità di vendita (riordini)
     const lookStartISO = endExclusive.minus({ days: REORDER_LOOKBACK_DAYS })
       .toUTC()
       .toISO();
@@ -167,13 +152,12 @@ export default async function handler(req, res) {
       lookByVariant.set(key, (lookByVariant.get(key) || 0) + (li.quantity || 0));
     }
 
-    // 6) Canali + Metodi di pagamento
+    // 6) Canali + Metodi (misto se più gateway nello stesso ordine)
     const channelTotals = { POS: { qty: 0, revenue: 0 }, ONLINE: { qty: 0, revenue: 0 } };
     for (const li of lines) {
       channelTotals[li.channel].qty += li.quantity;
       channelTotals[li.channel].revenue += li.lineRevenue ?? 0;
     }
-
     const orderIds = Array.from(new Set(lines.map((x) => x.orderId)));
     const txByOrder = await fetchTransactionsForOrders(orderIds);
     const paymentTotals = {};
@@ -226,10 +210,10 @@ export default async function handler(req, res) {
       return res.status(200).send(html);
     }
 
-    if (!RESEND_KEY) {
+    if (!RESEND_KEY || !TO || !FROM) {
       return res
         .status(200)
-        .json({ ok: true, items: rows.length, note: "No RESEND_API_KEY, skipped email" });
+        .json({ ok: true, items: rows.length, note: "No email (missing RESEND/TO/FROM)" });
     }
 
     const resend = new Resend(RESEND_KEY);
@@ -248,13 +232,13 @@ export default async function handler(req, res) {
 }
 
 // ===================================================================
-// Range “a bordo esclusivo” (niente sforamento al giorno successivo)
+// Range “a bordo esclusivo” (niente sforamento al giorno dopo)
 // ===================================================================
 function computeRange(period, nowLocal, { TODAY = false, CURRENT = false } = {}) {
   if (period === "daily") {
     if (TODAY) {
       const start = nowLocal.startOf("day");
-      const endExclusive = nowLocal; // fino ad ora (esclusivo)
+      const endExclusive = nowLocal;
       return { start, endExclusive, rangeLabel: `Hoy ${start.toFormat("dd LLL yyyy")}` };
     }
     const start = nowLocal.minus({ days: 1 }).startOf("day");
@@ -264,7 +248,7 @@ function computeRange(period, nowLocal, { TODAY = false, CURRENT = false } = {})
 
   if (period === "weekly") {
     if (CURRENT) {
-      const start = nowLocal.startOf("week"); // lun locale
+      const start = nowLocal.startOf("week");
       const endExclusive = nowLocal;
       return {
         start,
@@ -272,7 +256,7 @@ function computeRange(period, nowLocal, { TODAY = false, CURRENT = false } = {})
         rangeLabel: `Semana ${start.toFormat("dd LLL")} – ${endExclusive.toFormat("dd LLL yyyy")}`,
       };
     }
-    const endExclusive = nowLocal.startOf("week"); // lun corrente (esclusivo)
+    const endExclusive = nowLocal.startOf("week");
     const start = endExclusive.minus({ weeks: 1 });
     return {
       start,
@@ -431,7 +415,7 @@ async function fetchIncomingViaPurchaseOrders(variantIdToItemNum) {
     const res = await fetch(REST_URL(`/purchase_orders.json?${params.toString()}`), {
       headers: { "X-Shopify-Access-Token": TOKEN },
     });
-    if (!res.ok) return { pos: [], link: null };
+    if (!res.ok) throw new Error(`PO REST ${res.status}`);
     const json = await res.json();
     return { pos: json.purchase_orders || [], link: res.headers.get("link") };
   };
