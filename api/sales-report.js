@@ -306,9 +306,9 @@ function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paym
 
 function renderProductsTable(rows, money) {
   const head = `<thead><tr>
-    <th>Producto</th><th>Variante</th><th>SKU</th>
-    <th>Precio unitario</th><th>Vendidas</th><th>Ingresos</th>
-    <th>Inventario</th><th>En camino</th><th>Ubicaciones</th>
+    <<th>Producto</th><th>Variante</th><th>SKU</th>
+	<th>Precio unitario</th><th>Vendidas</th><th>Ingresos</th>
+	<th>Inventario</th><th>En camino</th>
   </tr></thead>`;
   const body = rows.map(r => {
     const locs = (r.locations || []).map(l => `${l.name}: ${l.available ?? 0}${l.incoming ? ` (+${l.incoming})` : ""}`).join("<br/>");
