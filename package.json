@@ -1,0 +1,10 @@
+{
+  "name": "shopify-reports-vercel",
+  "version": "1.1.0",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "luxon": "^3.5.0",
+    "resend": "^3.2.0"
+  }
+}
