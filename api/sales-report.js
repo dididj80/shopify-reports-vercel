@@ -352,7 +352,7 @@ function svgDonut(segments, title) {
   const radius = 40, circumference = 2 * Math.PI * radius;
   let offset = 0;
 
-  // PALETTE a colori (puoi cambiarla)
+  // palette colori (modificabile)
   const colors = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#14B8A6"];
 
   const rings = segments.map((seg, i) => {
@@ -368,16 +368,14 @@ function svgDonut(segments, title) {
     return circle;
   }).join("");
 
-  // Legenda con percentuali
   const legend = segments.map((s, i) => {
     const val = s.value || 0;
     const pct = Math.round((val / total) * 100);
     return `
       <div style="display:flex;align-items:center;margin:2px 0;">
-        <span style="display:inline-block;width:10px;height:10px;background:${colors[i % colors.length]};margin-right:6px;border-radius:2px;"></span>
+        <span style="width:10px;height:10px;display:inline-block;background:${colors[i % colors.length]};margin-right:6px;border-radius:2px;"></span>
         <span>${escapeHtml(String(s.label))}: <strong>${val.toLocaleString("es-MX")}</strong> (${pct}%)</span>
-      </div>
-    `;
+      </div>`;
   }).join("");
 
   return `
