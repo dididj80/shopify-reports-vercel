@@ -395,34 +395,49 @@ async function fetchIncomingForInventoryItems(variantIdToItemId) {
 }
 
 // Transazioni per ordine (REST)
-async function fetchTransactionsForOrders(orderGids) {
-  const result = {};
-  const concurrency = 5;
-  const queue = [...orderGids];
+// Somma "incoming" per inventory_item_ids via REST (usa ID NUMERICI)
+async function fetchIncomingForInventoryItems(variantIdToItemId) {
+  // reverse: numeric_item_id -> variantId
+  const reverse = {};
+  const numericItemIds = [];
 
-  const workers = Array.from({ length: concurrency }, () => (async () => {
-    while (queue.length) {
-      const gid = queue.shift();
-      const numericId = String(gid).split("/").pop();
-      const url = `https://${SHOP}/admin/api/2024-10/orders/${numericId}/transactions.json`;
-      try {
-        const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
-        if (!res.ok) { result[gid] = []; continue; }
-        const json = await res.json();
-        const txs = (json.transactions || [])
-          .filter(t => t.status === "success")
-          .map(t => ({ gateway: String(t.gateway || "unknown"), amount: Number(t.amount || 0) }))
-          .filter(t => t.amount > 0);
-        result[gid] = txs;
-      } catch {
-        result[gid] = [];
-      }
+  for (const [variantId, itemGid] of Object.entries(variantIdToItemId)) {
+    const num = String(itemGid).split("/").pop(); // estrae 123456789 da gid://.../InventoryItem/123456789
+    reverse[num] = variantId;
+    numericItemIds.push(num);
+  }
+
+  const out = {}; // variantId -> incoming totale
+  if (!numericItemIds.length) return out;
+
+  // Shopify consiglia max 50 per chiamata
+  const chunks = [];
+  for (let i = 0; i < numericItemIds.length; i += 50) {
+    chunks.push(numericItemIds.slice(i, i + 50));
+  }
+
+  for (const ids of chunks) {
+    const qs = encodeURIComponent(ids.join(","));
+    const url = `https://${SHOP}/admin/api/2024-10/inventory_levels.json?inventory_item_ids=${qs}`;
+    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
+    if (!res.ok) continue;
+
+    const json = await res.json();
+    const levels = json.inventory_levels || [];
+
+    // Somma su TUTTE le location gli incoming per ogni inventory_item_id
+    for (const L of levels) {
+      const itemNum = String(L.inventory_item_id);
+      const variantId = reverse[itemNum];
+      if (!variantId) continue;
+      const incoming = Number(L.incoming || 0);
+      out[variantId] = (out[variantId] || 0) + incoming;
     }
-  })());
+  }
 
-  await Promise.all(workers);
-  return result;
+  return out;
 }
+
 
 async function shopifyGraphQL(query, variables) {
   const res = await fetch(SHOPIFY_GRAPHQL, {
