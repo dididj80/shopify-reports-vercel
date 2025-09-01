@@ -238,37 +238,18 @@ async function fetchInventoryForVariants(variantIds) {
       nodes(ids: $ids) {
         ... on ProductVariant {
           id
-          inventoryItem {
-            inventoryLevels(first: 20) {
-              edges {
-                node {
-                  available
-                  incoming
-                  location { name }
-                }
-              }
-            }
-          }
+          inventoryQuantity
         }
       }
     }`;
   const data = await shopifyGraphQL(query, { ids: variantIds });
-  return data.nodes.map(n => {
-    const levels = (n.inventoryItem?.inventoryLevels?.edges || []).map(e => ({
-      name: e.node?.location?.name || "",
-      available: e.node?.available ?? null,
-      incoming: e.node?.incoming ?? null
-    }));
-    const sum = arr => arr.reduce((s, x) => s + (x ?? 0), 0);
-    return {
-      variantId: n.id,
-      totalAvailable: sum(levels.map(l => l.available)),
-      totalIncoming: sum(levels.map(l => l.incoming)),
-      locations: levels
-    };
-  });
+  return (data.nodes || []).filter(Boolean).map(n => ({
+    variantId: n.id,
+    totalAvailable: n.inventoryQuantity ?? null,
+    totalIncoming: null,
+    locations: [] // non serve con 1 location
+  }));
 }
-
 async function fetchTransactionsForOrders(orderGids) {
   const result = {};
   for (const gid of orderGids) {
