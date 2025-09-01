@@ -1,5 +1,3 @@
-# shopify-reports-vercel
-Report giornalieri, settimanali, mensile shopify
 # Shopify Reports on Vercel
 
 Report automatici giornalieri, settimanali e mensili via email:
