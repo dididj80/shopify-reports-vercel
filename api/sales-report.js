@@ -1,9 +1,9 @@
 // /api/sales-report.js
 // Report vendite Shopify: daily / weekly / monthly
-// - Tabella prodotti (vendite, inventario)
-// - Donut a colori (POS vs Online, Metodi di pagamento)
-// - Logica "Pago Mixto" (ordini con >1 gateway)
-// - Sezione "Riordini consigliati" (velocità, copertura, ROP, Target, Qty consigliata)
+// - Tabella prodotti (vendite, inventario, incoming)
+// - Riordini consigliati (velocità/copertura/ROP/Target)
+// - Tabella metodi di pagamento (con "Pago Mixto")
+// - GRAFICI in fondo (donut Canali + donut Metodi)
 // DRYRUN: REPORT_DRYRUN=true => non invia email; preview HTML con ?preview=1
 
 import { DateTime } from "luxon";
@@ -76,25 +76,31 @@ export default async function handler(req, res) {
             unitPrice: unit,
             revenue: rev,
             inventoryAvailable: null,
-            inventoryIncoming: null,
-            locations: []
+            inventoryIncoming: null
           });
         }
       }
 
-      // 3) Inventario totale per variante (solo dove abbiamo una variantId)
+      // 3) Inventario totale + INCOMING per variante (solo dove c'è una variantId)
       const variantIds = Array.from(byVariant.keys()).filter(k => !(k.startsWith("SKU:") || k.startsWith("NAME:")));
       if (variantIds.length) {
-        const inv = await fetchInventoryForVariants(variantIds);
+        // a) quantità on-hand totale via GraphQL
+        const inv = await fetchInventoryForVariants(variantIds); // inventoryQuantity
+        // b) incoming reale via REST inventory_levels (prima serve inventoryItem.id)
+        const invItems = await fetchInventoryItemIds(variantIds);
+        const incomingByVariant = await fetchIncomingForInventoryItems(invItems); // somma incoming
         for (const it of inv) {
           const rec = byVariant.get(it.variantId);
           if (!rec) continue;
           rec.inventoryAvailable = it.totalAvailable;
-          rec.inventoryIncoming = it.totalIncoming; // null in questa patch
+        }
+        for (const [variantId, incoming] of Object.entries(incomingByVariant)) {
+          const rec = byVariant.get(variantId);
+          if (rec) rec.inventoryIncoming = incoming;
         }
       }
 
-      // 4) Vendite lookback per velocità (tutte le linee negli ultimi N giorni)
+      // 4) Vendite lookback per velocità
       const lookbackEnd = end; // fine periodo
       const lookbackStart = lookbackEnd.minus({ days: REORDER_LOOKBACK_DAYS });
       const lookStartISO = lookbackStart.toUTC().toISO();
@@ -149,15 +155,15 @@ export default async function handler(req, res) {
       // 9) Calcolo riordini consigliati
       const reorder = computeReorder(rows, lookByVariant);
 
-      // 10) Render email
+      // 10) Render email (grafici alla fine)
       const html = renderEmailHTML({
         period: p,
         rangeLabel,
         rows,
         totals,
-        channelTotals,
         paymentTotals,
         reorder,
+        channelTotals, // usato solo per i grafici in fondo
         money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n)
       });
 
@@ -267,7 +273,7 @@ async function fetchOrdersWithLines(startISO, endISO) {
                     sku
                     name
                     product { title }
-                    variant { id title }
+                    variant { id title inventoryItem { id } }
                     originalUnitPriceSet { shopMoney { amount } }
                     discountedTotalSet { shopMoney { amount } }
                   }
@@ -310,8 +316,8 @@ async function fetchOrdersWithLines(startISO, endISO) {
   return out;
 }
 
+// Totale on-hand per variante (GraphQL)
 async function fetchInventoryForVariants(variantIds) {
-  // Compatibile API 2024-10: inventario totale per variante
   const chunks = [];
   for (let i = 0; i < variantIds.length; i += 50) chunks.push(variantIds.slice(i, i + 50));
   const out = [];
@@ -333,16 +339,63 @@ async function fetchInventoryForVariants(variantIds) {
       out.push({
         variantId: n.id,
         totalAvailable: n.inventoryQuantity ?? null,
-        totalIncoming: null,
-        locations: []
+        totalIncoming: null
       });
     }
   }
   return out;
 }
 
+// Mappa: variantId -> inventoryItemId
+async function fetchInventoryItemIds(variantIds) {
+  const query = `
+    query InvItems($ids:[ID!]!) {
+      nodes(ids:$ids) {
+        ... on ProductVariant { id inventoryItem { id } }
+      }
+    }
+  `;
+  const data = await shopifyGraphQL(query, { ids: variantIds });
+  const map = {};
+  for (const n of (data.nodes || [])) {
+    if (n && n.inventoryItem?.id) map[n.id] = n.inventoryItem.id;
+  }
+  return map; // { variantGID: inventoryItemGID }
+}
+
+// Somma "incoming" per inventory_item_ids via REST
+async function fetchIncomingForInventoryItems(variantIdToItemId) {
+  const itemIds = Object.values(variantIdToItemId);
+  const out = {}; // variantId -> incoming totale
+  if (!itemIds.length) return out;
+
+  const chunks = [];
+  for (let i = 0; i < itemIds.length; i += 50) chunks.push(itemIds.slice(i, i + 50));
+
+  for (const ids of chunks) {
+    const qs = encodeURIComponent(ids.join(","));
+    const url = `https://${SHOP}/admin/api/2024-10/inventory_levels.json?inventory_item_ids=${qs}`;
+    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
+    if (!res.ok) continue;
+    const json = await res.json();
+    const levels = json.inventory_levels || [];
+    // costruiamo reverse: inventoryItemId -> totale incoming
+    const byItem = {};
+    for (const L of levels) {
+      const item = L.inventory_item_id;
+      const incoming = Number(L.incoming || 0);
+      byItem[item] = (byItem[item] || 0) + incoming;
+    }
+    // rimappa a variantId
+    for (const [variantId, itemId] of Object.entries(variantIdToItemId)) {
+      if (byItem[itemId] != null) out[variantId] = byItem[itemId];
+    }
+  }
+  return out;
+}
+
+// Transazioni per ordine (REST)
 async function fetchTransactionsForOrders(orderGids) {
-  // REST: /orders/{id}/transactions.json
   const result = {};
   const concurrency = 5;
   const queue = [...orderGids];
@@ -401,7 +454,6 @@ function computeReorder(rows, lookByVariant) {
     const onHand = Number(r.inventoryAvailable ?? 0);
     const incoming = Number(r.inventoryIncoming ?? 0);
 
-    // Se non abbiamo on hand (es. nessuna variantId) salta il blocco riordino
     if (r.variantId == null) continue;
 
     const coverage = vel > 0 ? onHand / vel : Infinity; // giorni
@@ -428,15 +480,14 @@ function computeReorder(rows, lookByVariant) {
     }
   }
 
-  // Ordina per copertura crescente (prima quelli che finiscono prima)
   need.sort((a, b) => (a.coverage - b.coverage));
   return need;
 }
 
 // ===================================================================
-// Email rendering
+// Email rendering (grafici in fondo)
 // ===================================================================
-function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paymentTotals, reorder, money }) {
+function renderEmailHTML({ period, rangeLabel, rows, totals, paymentTotals, reorder, channelTotals, money }) {
   const style = `
     <style>
       body { font-family: Inter, Arial, sans-serif; color:#111; }
@@ -446,6 +497,8 @@ function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paym
       h2 { margin-bottom: 6px; }
       p { margin: 0 0 10px 0; color:#444; }
       h3 { margin: 14px 0 6px 0; }
+      .muted { color:#6B7280; font-size:12px; }
+      .spacer { height: 16px; }
     </style>
   `;
 
@@ -455,64 +508,23 @@ function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paym
        &nbsp;•&nbsp; <strong>Ingresos:</strong> ${money(totals.revenue)}</p>
   `;
 
-  const reorderBlock = renderReorderBlock(reorder, money);
-  const channelBlock = renderChannelBlock(channelTotals);
-  const paymentsBlock = renderPaymentsBlock(paymentTotals, money);
-  const table = renderProductsTable(rows, money);
+  const productsTable = renderProductsTable(rows, money);
+  const reorderBlock = renderReorderBlock(reorder);
+  const paymentsTable = renderPaymentsTable(paymentTotals, money);
+
+  // Grafici in fondo
+  const chartsBlock = renderAllDonuts(channelTotals, paymentTotals);
 
   return `<!doctype html><html><head>${style}</head><body>
     ${header}
+    ${productsTable}
+    <div class="spacer"></div>
     ${reorderBlock}
-    ${channelBlock}
-    ${paymentsBlock}
-    ${table}
+    <div class="spacer"></div>
+    ${paymentsTable}
+    <div class="spacer"></div>
+    ${chartsBlock}
   </body></html>`;
-}
-
-function renderReorderBlock(list, money) {
-  if (!list || list.length === 0) {
-    return `<h3>Riordini consigliati</h3><p>Nessun articolo critico in base alla copertura.</p>`;
-  }
-  const rows = list.slice(0, 50).map(it => `
-    <tr>
-      <td>${escapeHtml(it.productTitle)}</td>
-      <td>${escapeHtml(it.variantTitle)}</td>
-      <td>${escapeHtml(it.sku || "")}</td>
-      <td align="right">${it.onHand}</td>
-      <td align="right">${it.incoming}</td>
-      <td align="right">${it.soldLook}</td>
-      <td align="right">${it.vel.toFixed(2)}</td>
-      <td align="right">${Number.isFinite(it.coverage) ? it.coverage.toFixed(1) : "∞"}</td>
-      <td align="right">${Math.ceil(it.rop)}</td>
-      <td align="right">${Math.ceil(it.target)}</td>
-      <td align="right"><strong>${it.suggested}</strong></td>
-    </tr>
-  `).join("");
-
-  return `
-    <h3>Riordini consigliati</h3>
-    <p style="margin-top:-4px;color:#555;font-size:12px">
-      Finestra vendite: ${REORDER_LOOKBACK_DAYS}gg • Lead: ${REORDER_LEAD_DAYS} • Safety: ${REORDER_SAFETY_DAYS} • Review: ${REORDER_REVIEW_DAYS}
-    </p>
-    <table>
-      <thead>
-        <tr>
-          <th align="left">Prodotto</th>
-          <th align="left">Variante</th>
-          <th align="left">SKU</th>
-          <th align="right">On hand</th>
-          <th align="right">Incoming</th>
-          <th align="right">Vendite ${REORDER_LOOKBACK_DAYS}gg</th>
-          <th align="right">Vel/dì</th>
-          <th align="right">Copertura (gg)</th>
-          <th align="right">ROP</th>
-          <th align="right">Target</th>
-          <th align="right">Qty cons.</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
 }
 
 function renderProductsTable(rows, money) {
@@ -542,30 +554,59 @@ function renderProductsTable(rows, money) {
         <td align="right">${r.inventoryIncoming ?? ""}</td>
       </tr>
     `).join("");
-  return `<table>${head}<tbody>${body}</tbody></table>`;
+  return `<h3>Ventas por producto</h3><table>${head}<tbody>${body}</tbody></table>`;
 }
 
-function renderChannelBlock(channelTotals) {
-  const segQty = [
-    { label: "Físicas (POS)", value: channelTotals.POS.qty },
-    { label: "Online",        value: channelTotals.ONLINE.qty }
-  ];
-  const segRev = [
-    { label: "Físicas (POS)", value: Math.round(channelTotals.POS.revenue) },
-    { label: "Online",        value: Math.round(channelTotals.ONLINE.revenue) }
-  ];
-  const donutQty = svgDonut(segQty, "Piezas por canal");
-  const donutRev = svgDonut(segRev, "Ingresos por canal");
-  return `<h3>Canales de venta</h3>${donutQty}${donutRev}`;
+function renderReorderBlock(list) {
+  if (!list || list.length === 0) {
+    return `<h3>Riordini consigliati</h3><p class="muted">Nessun articolo critico in base alla copertura.</p>`;
+  }
+  const rows = list.slice(0, 50).map(it => `
+    <tr>
+      <td>${escapeHtml(it.productTitle)}</td>
+      <td>${escapeHtml(it.variantTitle)}</td>
+      <td>${escapeHtml(it.sku || "")}</td>
+      <td align="right">${it.onHand}</td>
+      <td align="right">${it.incoming}</td>
+      <td align="right">${it.soldLook}</td>
+      <td align="right">${it.vel.toFixed(2)}</td>
+      <td align="right">${Number.isFinite(it.coverage) ? it.coverage.toFixed(1) : "∞"}</td>
+      <td align="right">${Math.ceil(it.rop)}</td>
+      <td align="right">${Math.ceil(it.target)}</td>
+      <td align="right"><strong>${it.suggested}</strong></td>
+    </tr>
+  `).join("");
+
+  return `
+    <h3>Riordini consigliati</h3>
+    <p class="muted">
+      Finestra vendite: ${REORDER_LOOKBACK_DAYS}gg • Lead: ${REORDER_LEAD_DAYS} • Safety: ${REORDER_SAFETY_DAYS} • Review: ${REORDER_REVIEW_DAYS}
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th align="left">Prodotto</th>
+          <th align="left">Variante</th>
+          <th align="left">SKU</th>
+          <th align="right">On hand</th>
+          <th align="right">Incoming</th>
+          <th align="right">Vendite ${REORDER_LOOKBACK_DAYS}gg</th>
+          <th align="right">Vel/dì</th>
+          <th align="right">Copertura (gg)</th>
+          <th align="right">ROP</th>
+          <th align="right">Target</th>
+          <th align="right">Qty cons.</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
 }
 
-function renderPaymentsBlock(paymentTotals, money) {
+function renderPaymentsTable(paymentTotals, money) {
   const entries = Object.entries(paymentTotals).sort((a,b) => b[1].revenue - a[1].revenue);
-  const segRev = entries.map(([gw, v]) => ({ label: gatewayLabel(gw), value: Math.round(v.revenue) }));
-  const segQty = entries.map(([gw, v]) => ({ label: gatewayLabel(gw), value: Math.round(v.qty) }));
-  const donutRev = svgDonut(segRev, "Ingresos por método de pago");
-  const donutQty = svgDonut(segQty, "Piezas por método de pago");
   const table = `
+    <h3>Métodos de pago</h3>
     <table style="border-collapse:collapse;width:100%;margin-top:6px;">
       <thead>
         <tr>
@@ -583,7 +624,30 @@ function renderPaymentsBlock(paymentTotals, money) {
           </tr>`).join("")}
       </tbody>
     </table>`;
-  return `<h3>Métodos de pago</h3>${donutRev}${donutQty}${table}`;
+  return table;
+}
+
+// Tutti i donut in fondo
+function renderAllDonuts(channelTotals, paymentTotals) {
+  const segQtyChannel = [
+    { label: "Físicas (POS)", value: channelTotals.POS.qty },
+    { label: "Online",        value: channelTotals.ONLINE.qty }
+  ];
+  const segRevChannel = [
+    { label: "Físicas (POS)", value: Math.round(channelTotals.POS.revenue) },
+    { label: "Online",        value: Math.round(channelTotals.ONLINE.revenue) }
+  ];
+  const segRevPay = Object.entries(paymentTotals)
+    .map(([gw, v]) => ({ label: gatewayLabel(gw), value: Math.round(v.revenue) }));
+  const segQtyPay = Object.entries(paymentTotals)
+    .map(([gw, v]) => ({ label: gatewayLabel(gw), value: Math.round(v.qty) }));
+
+  const donutQtyChannel = svgDonut(segQtyChannel, "Piezas por canal");
+  const donutRevChannel = svgDonut(segRevChannel, "Ingresos por canal");
+  const donutRevPay = svgDonut(segRevPay, "Ingresos por método de pago");
+  const donutQtyPay = svgDonut(segQtyPay, "Piezas por método di pago".replace("di","de")); // piccola correzione lingua
+
+  return `<h3>Gráficos</h3>${donutQtyChannel}${donutRevChannel}${donutRevPay}${donutQtyPay}`;
 }
 
 function gatewayLabel(key) {
