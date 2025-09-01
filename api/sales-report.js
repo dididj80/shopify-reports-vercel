@@ -123,6 +123,12 @@ export default async function handler(req, res) {
         money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n)
       });
 
+	// Se chiedi ?preview=1 in dry-run, ritorna l'HTML completo nel browser
+	if (process.env.REPORT_DRYRUN === "true" && url.searchParams.get("preview") === "1") {
+  		res.setHeader("Content-Type", "text/html; charset=UTF-8");
+ 	 	return res.status(200).send(html);
+		}
+		
       // invio/dryrun
       if (process.env.REPORT_DRYRUN === "true") {
         console.log("=== DRYRUN ===", p, rangeLabel);
