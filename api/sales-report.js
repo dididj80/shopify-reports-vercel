@@ -1,7 +1,10 @@
 // /api/sales-report.js
 // Report vendite Shopify: daily / weekly / monthly
-// Tabella + grafici (POS vs Online, Metodi di pagamento)
-// DRYRUN: se REPORT_DRYRUN=true non invia email, logga l’anteprima o mostra l’HTML con ?preview=1
+// - Tabella prodotti (vendite, inventario)
+// - Donut a colori (POS vs Online, Metodi di pagamento)
+// - Logica "Pago Mixto" (ordini con >1 gateway)
+// - Sezione "Riordini consigliati" (velocità, copertura, ROP, Target, Qty consigliata)
+// DRYRUN: REPORT_DRYRUN=true => non invia email; preview HTML con ?preview=1
 
 import { DateTime } from "luxon";
 import { Resend } from "resend";
@@ -14,8 +17,14 @@ const TO = process.env.REPORT_TO_EMAIL;
 const FROM = process.env.REPORT_FROM_EMAIL;
 const CURRENCY = process.env.REPORT_CURRENCY || "MXN";
 const LOCALE = process.env.REPORT_LOCALE || "es-MX";
-// Fuso corretto per te
 const TZ = "America/Monterrey";
+
+// Reordering defaults (configurabili)
+const REORDER_LOOKBACK_DAYS = Number(process.env.REORDER_LOOKBACK_DAYS || 30);
+const REORDER_LEAD_DAYS = Number(process.env.REORDER_LEAD_DAYS || 7);
+const REORDER_SAFETY_DAYS = Number(process.env.REORDER_SAFETY_DAYS || 3);
+const REORDER_REVIEW_DAYS = Number(process.env.REORDER_REVIEW_DAYS || 7);
+const REORDER_MIN_QTY = Number(process.env.REORDER_MIN_QTY || 1);
 
 const SHOPIFY_GRAPHQL = `https://${SHOP}/admin/api/2024-10/graphql.json`;
 
@@ -24,7 +33,6 @@ const SHOPIFY_GRAPHQL = `https://${SHOP}/admin/api/2024-10/graphql.json`;
 // ===================================================================
 export default async function handler(req, res) {
   try {
-    // Controllo env minimi
     if (!SHOP || !TOKEN || !TO || !FROM) {
       if (!res.headersSent) {
         return res.status(400).json({ ok: false, error: "Missing env: SHOPIFY_SHOP, SHOPIFY_ADMIN_TOKEN, REPORT_TO_EMAIL, REPORT_FROM_EMAIL" });
@@ -35,24 +43,21 @@ export default async function handler(req, res) {
     const url = new URL(req.url, `https://${req.headers.host}`);
     const qsPeriod = (url.searchParams.get("period") || "").toLowerCase();
 
-    // Orario locale per calcolo periodi
     const nowLocal = DateTime.now().setZone(TZ);
-    const isMonday = nowLocal.weekday === 1; // lunedì
-    const isFirstDay = nowLocal.day === 1;   // giorno 1 del mese
+    const isMonday = nowLocal.weekday === 1;
+    const isFirstDay = nowLocal.day === 1;
 
-    // Runner di un singolo report (daily/weekly/monthly)
     const runOne = async (p) => {
       const { start, end, rangeLabel } = computeRange(p, nowLocal);
       const startISO = start.toUTC().toISO();
       const endISO = end.toUTC().toISO();
 
-      // 1) Ordini + line items
+      // 1) Ordini + line items del periodo
       const lines = await fetchOrdersWithLines(startISO, endISO);
 
       // 2) Aggregazione per variante
       const byVariant = new Map();
       for (const li of lines) {
-        // fallback se manca variantId: usa SKU o Nome
         const key = li.variantId || (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
         const prev = byVariant.get(key);
         const unit = li.unitPrice ?? null;
@@ -71,28 +76,39 @@ export default async function handler(req, res) {
             unitPrice: unit,
             revenue: rev,
             inventoryAvailable: null,
-            inventoryIncoming: null, // con 1 location e questa API di solito resta nullo
-            locations: []            // non usato nella vista semplificata
+            inventoryIncoming: null,
+            locations: []
           });
         }
       }
 
-      // 3) Inventario totale per variante (API 2024-10)
-      const variantIds = Array.from(byVariant.keys())
-        .map(k => (k.startsWith("SKU:") || k.startsWith("NAME:")) ? null : k)
-        .filter(Boolean);
+      // 3) Inventario totale per variante (solo dove abbiamo una variantId)
+      const variantIds = Array.from(byVariant.keys()).filter(k => !(k.startsWith("SKU:") || k.startsWith("NAME:")));
       if (variantIds.length) {
         const inv = await fetchInventoryForVariants(variantIds);
         for (const it of inv) {
           const rec = byVariant.get(it.variantId);
           if (!rec) continue;
           rec.inventoryAvailable = it.totalAvailable;
-          rec.inventoryIncoming = it.totalIncoming; // null nella patch attuale
-          rec.locations = it.locations;             // []
+          rec.inventoryIncoming = it.totalIncoming; // null in questa patch
         }
       }
 
-      // 4) Totali canali (POS vs ONLINE)
+      // 4) Vendite lookback per velocità (tutte le linee negli ultimi N giorni)
+      const lookbackEnd = end; // fine periodo
+      const lookbackStart = lookbackEnd.minus({ days: REORDER_LOOKBACK_DAYS });
+      const lookStartISO = lookbackStart.toUTC().toISO();
+      const lookEndISO = lookbackEnd.toUTC().toISO();
+      const lookLines = await fetchOrdersWithLines(lookStartISO, lookEndISO);
+
+      const lookByVariant = new Map(); // key -> qty su lookback
+      for (const li of lookLines) {
+        const key = li.variantId || (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
+        const prev = lookByVariant.get(key) || 0;
+        lookByVariant.set(key, prev + (li.quantity || 0));
+      }
+
+      // 5) Canali POS/ONLINE
       const channelTotals = { POS: { qty: 0, revenue: 0 }, ONLINE: { qty: 0, revenue: 0 } };
       for (const li of lines) {
         const ch = li.channel;
@@ -100,11 +116,10 @@ export default async function handler(req, res) {
         channelTotals[ch].revenue += li.lineRevenue ?? 0;
       }
 
-      // 5) Metodi di pagamento
-      //   >>> NUOVA LOGICA: se un ordine ha >1 gateway => "mixto"
+      // 6) Metodi di pagamento (con "Pago Mixto")
       const orderIds = Array.from(new Set(lines.map(l => l.orderId)));
       const txByOrder = await fetchTransactionsForOrders(orderIds);
-      const paymentTotals = {}; // gateway -> { qty, revenue }
+      const paymentTotals = {};
       for (const li of lines) {
         const txs = txByOrder[li.orderId] || [];
         if (txs.length === 0) {
@@ -117,22 +132,24 @@ export default async function handler(req, res) {
           paymentTotals["mixto"].revenue += (li.lineRevenue ?? 0);
           continue;
         }
-        // Caso singolo gateway
         const t = txs[0];
         (paymentTotals[t.gateway] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
         paymentTotals[t.gateway].revenue += (li.lineRevenue ?? 0);
       }
 
-      // 6) Ordinamento righe per vendite poi revenue
+      // 7) Ordinamento righe per vendite poi revenue
       const rows = Array.from(byVariant.values()).sort((a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
 
-      // 7) Totali generali
+      // 8) Totali generali
       const totals = {
         qty: rows.reduce((s, r) => s + r.soldQty, 0),
         revenue: rows.reduce((s, r) => s + r.revenue, 0)
       };
 
-      // 8) Render email
+      // 9) Calcolo riordini consigliati
+      const reorder = computeReorder(rows, lookByVariant);
+
+      // 10) Render email
       const html = renderEmailHTML({
         period: p,
         rangeLabel,
@@ -140,10 +157,11 @@ export default async function handler(req, res) {
         totals,
         channelTotals,
         paymentTotals,
+        reorder,
         money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n)
       });
 
-      // --- PREVIEW: se ?preview=1 e DRYRUN, rispondi HTML e termina
+      // Preview
       if (process.env.REPORT_DRYRUN === "true" && url.searchParams.get("preview") === "1") {
         if (!res.headersSent) {
           res.setHeader("Content-Type", "text/html; charset=UTF-8");
@@ -152,7 +170,7 @@ export default async function handler(req, res) {
         return { sent: true, period: p, items: rows.length };
       }
 
-      // --- DRYRUN: log a console
+      // Dry-run log
       if (process.env.REPORT_DRYRUN === "true") {
         console.log("=== DRYRUN ===", p, rangeLabel);
         console.log("Subject:", `Reporte ${periodLabel(p)} — ${rangeLabel}`);
@@ -160,7 +178,7 @@ export default async function handler(req, res) {
         return { sent: false, period: p, items: rows.length };
       }
 
-      // --- INVIO reale via Resend ---
+      // Invio reale
       if (!RESEND_KEY) throw new Error("Missing RESEND_API_KEY");
       const resend = new Resend(RESEND_KEY);
       await resend.emails.send({
@@ -172,10 +190,9 @@ export default async function handler(req, res) {
       return { sent: true, period: p, items: rows.length };
     };
 
-    // Se ?period=... → esegui SOLO quel report
+    // SINGLE
     if (qsPeriod === "daily" || qsPeriod === "weekly" || qsPeriod === "monthly") {
       const out = await runOne(qsPeriod);
-      // Se era preview, la risposta è già stata inviata
       if (out.sent && url.searchParams.get("preview") === "1") return;
       if (!res.headersSent) {
         return res.status(200).json({ ok: true, mode: "single", period: out.period, items: out.items });
@@ -183,7 +200,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Modalità AUTO (per usare 1 solo cron): daily + (lunedì) weekly + (1° del mese) monthly
+    // AUTO (1 cron)
     const results = [];
     const d = await runOne("daily");   results.push({ period: d.period, items: d.items, sent: d.sent });
     if (isMonday)  { const w = await runOne("weekly");  results.push({ period: w.period, items: w.items, sent: w.sent }); }
@@ -215,7 +232,6 @@ function computeRange(period, nowLocal) {
     const wStart = wEnd.startOf("week");
     return { start: wStart, end: wEnd, rangeLabel: `Semana ${wStart.toFormat("dd LLL")} – ${wEnd.toFormat("dd LLL yyyy")}` };
   }
-  // monthly
   const mEnd = nowLocal.startOf("month").minus({ seconds: 1 });
   const mStart = mEnd.startOf("month");
   return { start: mStart, end: mEnd, rangeLabel: `Mes ${mStart.toFormat("LLLL yyyy")}` };
@@ -229,10 +245,7 @@ function periodLabel(p) {
 // Shopify fetch helpers
 // ===================================================================
 async function fetchOrdersWithLines(startISO, endISO) {
-  // Filtra ordini PAID nel range
   const q = `financial_status:PAID created_at:>=${startISO} created_at:<=${endISO}`;
-
-  // Paginazione batch
   const pageSize = 100;
   let cursor = null, hasNext = true;
   const out = [];
@@ -298,7 +311,7 @@ async function fetchOrdersWithLines(startISO, endISO) {
 }
 
 async function fetchInventoryForVariants(variantIds) {
-  // Patch compatibile API 2024-10: usa l'inventario TOTALE della variante
+  // Compatibile API 2024-10: inventario totale per variante
   const chunks = [];
   for (let i = 0; i < variantIds.length; i += 50) chunks.push(variantIds.slice(i, i + 50));
   const out = [];
@@ -376,9 +389,54 @@ function parseFloatSafe(x) {
 }
 
 // ===================================================================
+// Reorder calc
+// ===================================================================
+function computeReorder(rows, lookByVariant) {
+  const need = [];
+
+  for (const r of rows) {
+    const key = r.variantId || (r.sku ? `SKU:${r.sku}` : `NAME:${r.productTitle}__${r.variantTitle}`);
+    const soldLook = lookByVariant.get(key) || 0;
+    const vel = soldLook / Math.max(REORDER_LOOKBACK_DAYS, 1); // pezzi/dì
+    const onHand = Number(r.inventoryAvailable ?? 0);
+    const incoming = Number(r.inventoryIncoming ?? 0);
+
+    // Se non abbiamo on hand (es. nessuna variantId) salta il blocco riordino
+    if (r.variantId == null) continue;
+
+    const coverage = vel > 0 ? onHand / vel : Infinity; // giorni
+    const rop = vel * (REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS);
+    const target = vel * (REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS + REORDER_REVIEW_DAYS);
+    const suggestedRaw = Math.ceil(Math.max(0, target - (onHand + incoming)));
+    const suggested = suggestedRaw > 0 ? Math.max(REORDER_MIN_QTY, suggestedRaw) : 0;
+
+    const shouldReorder = (coverage <= (REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS)) || ((onHand + incoming) <= rop);
+    if (shouldReorder && suggested > 0) {
+      need.push({
+        productTitle: r.productTitle,
+        variantTitle: r.variantTitle,
+        sku: r.sku,
+        onHand,
+        incoming,
+        soldLook,
+        vel,
+        coverage,
+        rop,
+        target,
+        suggested
+      });
+    }
+  }
+
+  // Ordina per copertura crescente (prima quelli che finiscono prima)
+  need.sort((a, b) => (a.coverage - b.coverage));
+  return need;
+}
+
+// ===================================================================
 // Email rendering
 // ===================================================================
-function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paymentTotals, money }) {
+function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paymentTotals, reorder, money }) {
   const style = `
     <style>
       body { font-family: Inter, Arial, sans-serif; color:#111; }
@@ -390,19 +448,71 @@ function renderEmailHTML({ period, rangeLabel, rows, totals, channelTotals, paym
       h3 { margin: 14px 0 6px 0; }
     </style>
   `;
+
   const header = `
     <h2>Reporte ${escapeHtml(periodLabel(period))} — ${escapeHtml(rangeLabel)}</h2>
-    <p><strong>Total piezas:</strong> ${totals.qty.toLocaleString("es-MX")} &nbsp;•&nbsp; <strong>Ingresos:</strong> ${money(totals.revenue)}</p>
+    <p><strong>Total piezas:</strong> ${totals.qty.toLocaleString("es-MX")}
+       &nbsp;•&nbsp; <strong>Ingresos:</strong> ${money(totals.revenue)}</p>
   `;
+
+  const reorderBlock = renderReorderBlock(reorder, money);
   const channelBlock = renderChannelBlock(channelTotals);
   const paymentsBlock = renderPaymentsBlock(paymentTotals, money);
   const table = renderProductsTable(rows, money);
+
   return `<!doctype html><html><head>${style}</head><body>
     ${header}
+    ${reorderBlock}
     ${channelBlock}
     ${paymentsBlock}
     ${table}
   </body></html>`;
+}
+
+function renderReorderBlock(list, money) {
+  if (!list || list.length === 0) {
+    return `<h3>Riordini consigliati</h3><p>Nessun articolo critico in base alla copertura.</p>`;
+  }
+  const rows = list.slice(0, 50).map(it => `
+    <tr>
+      <td>${escapeHtml(it.productTitle)}</td>
+      <td>${escapeHtml(it.variantTitle)}</td>
+      <td>${escapeHtml(it.sku || "")}</td>
+      <td align="right">${it.onHand}</td>
+      <td align="right">${it.incoming}</td>
+      <td align="right">${it.soldLook}</td>
+      <td align="right">${it.vel.toFixed(2)}</td>
+      <td align="right">${Number.isFinite(it.coverage) ? it.coverage.toFixed(1) : "∞"}</td>
+      <td align="right">${Math.ceil(it.rop)}</td>
+      <td align="right">${Math.ceil(it.target)}</td>
+      <td align="right"><strong>${it.suggested}</strong></td>
+    </tr>
+  `).join("");
+
+  return `
+    <h3>Riordini consigliati</h3>
+    <p style="margin-top:-4px;color:#555;font-size:12px">
+      Finestra vendite: ${REORDER_LOOKBACK_DAYS}gg • Lead: ${REORDER_LEAD_DAYS} • Safety: ${REORDER_SAFETY_DAYS} • Review: ${REORDER_REVIEW_DAYS}
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th align="left">Prodotto</th>
+          <th align="left">Variante</th>
+          <th align="left">SKU</th>
+          <th align="right">On hand</th>
+          <th align="right">Incoming</th>
+          <th align="right">Vendite ${REORDER_LOOKBACK_DAYS}gg</th>
+          <th align="right">Vel/dì</th>
+          <th align="right">Copertura (gg)</th>
+          <th align="right">ROP</th>
+          <th align="right">Target</th>
+          <th align="right">Qty cons.</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
 }
 
 function renderProductsTable(rows, money) {
