@@ -1,0 +1,7 @@
+{
+  "crons": [
+    { "path": "/api/sales-report?period=daily",   "schedule": "05 06 * * *" },
+    { "path": "/api/sales-report?period=weekly",  "schedule": "10 06 * * 1" },
+    { "path": "/api/sales-report?period=monthly", "schedule": "15 06 1 * *" }
+  ]
+}
