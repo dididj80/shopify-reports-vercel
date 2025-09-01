@@ -351,23 +351,47 @@ function svgDonut(segments, title) {
   const total = segments.reduce((s, x) => s + (x.value || 0), 0) || 1;
   const radius = 40, circumference = 2 * Math.PI * radius;
   let offset = 0;
-  const colors = ["#4B5563", "#9CA3AF", "#D1D5DB", "#6B7280"];
+
+  // PALETTE a colori (puoi cambiarla)
+  const colors = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#14B8A6"];
+
   const rings = segments.map((seg, i) => {
-    const frac = (seg.value || 0) / total;
+    const val = seg.value || 0;
+    const frac = val / total;
     const len = frac * circumference;
-    const circle = `<circle r="${radius}" cx="50" cy="50" fill="transparent"
-      stroke="${colors[i % colors.length]}" stroke-width="16"
-      stroke-dasharray="${len} ${circumference - len}" stroke-dashoffset="${-offset}" />`;
+    const circle = `
+      <circle r="${radius}" cx="50" cy="50" fill="transparent"
+        stroke="${colors[i % colors.length]}" stroke-width="16"
+        stroke-dasharray="${len} ${circumference - len}" stroke-dashoffset="${-offset}" />
+    `;
     offset += len;
     return circle;
   }).join("");
-  return `<div style="display:flex;align-items:center;gap:10px;">
-    <svg width="120" height="120" viewBox="0 0 100 100" style="transform:rotate(-90deg)">
+
+  // Legenda con percentuali
+  const legend = segments.map((s, i) => {
+    const val = s.value || 0;
+    const pct = Math.round((val / total) * 100);
+    return `
+      <div style="display:flex;align-items:center;margin:2px 0;">
+        <span style="display:inline-block;width:10px;height:10px;background:${colors[i % colors.length]};margin-right:6px;border-radius:2px;"></span>
+        <span>${escapeHtml(String(s.label))}: <strong>${val.toLocaleString("es-MX")}</strong> (${pct}%)</span>
+      </div>
+    `;
+  }).join("");
+
+  return `
+  <div style="display:flex;gap:16px;align-items:center;margin:8px 0 12px 0;">
+    <svg width="140" height="140" viewBox="0 0 100 100" style="transform:rotate(-90deg);">
       <circle r="${radius}" cx="50" cy="50" fill="transparent" stroke="#E5E7EB" stroke-width="16"/>
       ${rings}
       <circle r="28" cx="50" cy="50" fill="white"/>
-      <text x="50" y="54" text-anchor="middle" font-size="8" fill="#111"
-        style="transform:rotate(90deg);transform-origin:50px 50px;">${title}</text>
+      <text x="50" y="47" text-anchor="middle" font-size="7" fill="#111"
+        style="transform:rotate(90deg);transform-origin:50px 50px;">${escapeHtml(title)}</text>
+      <text x="50" y="58" text-anchor="middle" font-size="7" fill="#6B7280"
+        style="transform:rotate(90deg);transform-origin:50px 50px;">Total ${total.toLocaleString("es-MX")}</text>
     </svg>
+    <div style="font-size:12px;color:#111;line-height:1.35">${legend}</div>
   </div>`;
 }
+
