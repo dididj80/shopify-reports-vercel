@@ -26,6 +26,7 @@ const REORDER_SAFETY_DAYS   = Number(process.env.REORDER_SAFETY_DAYS   || 3);
 const REORDER_REVIEW_DAYS   = Number(process.env.REORDER_REVIEW_DAYS   || 7);
 const REORDER_MIN_QTY       = Number(process.env.REORDER_MIN_QTY       || 1);
 
+const REST_INV_VERSION = process.env.SHOPIFY_REST_INV_VERSION || "2024-07";
 const SHOPIFY_GRAPHQL = `https://${SHOP}/admin/api/2024-10/graphql.json`;
 
 // ===================================================================
@@ -333,7 +334,8 @@ async function fetchInventoryItemIds(variantIds) {
 
 // ID numerici delle location
 async function fetchLocationIds() {
-  const url = `https://${SHOP}/admin/api/2024-10/locations.json`;
+  //const url = `https://${SHOP}/admin/api/2024-10/locations.json`;
+  const url = `https://${SHOP}/admin/api/${REST_INV_VERSION}/locations.json`;
   const res = await fetch(url, { headers:{ "X-Shopify-Access-Token": TOKEN } });
   if (!res.ok) return [];
   const json = await res.json();
@@ -357,7 +359,9 @@ async function fetchIncomingForInventoryItems(variantIdToItemId) {
 
   for (let i=0; i<numericItemIds.length; i+=50) {
     const ids = numericItemIds.slice(i, i+50);
-    const url = `https://${SHOP}/admin/api/2024-10/inventory_levels.json?inventory_item_ids=${encodeURIComponent(ids.join(","))}${locParam}`;
+    //const url = `https://${SHOP}/admin/api/2024-10/inventory_levels.json?inventory_item_ids=${encodeURIComponent(ids.join(","))}${locParam}`;
+    const url = `https://${SHOP}/admin/api/${REST_INV_VERSION}/inventory_levels.json?inventory_item_ids=${encodeURIComponent(ids.join(","))}${locParam}`;
+
     const res = await fetch(url, { headers:{ "X-Shopify-Access-Token": TOKEN } });
     if (!res.ok) continue;
     const json = await res.json();
