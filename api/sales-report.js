@@ -4,8 +4,7 @@
 // - Riordini consigliati (velocità lookback, coverage, ROP, Target, qty consigliata)
 // - Metodi di pagamento (con “Pago Mixto”)
 // - Grafici a torta in fondo (POS vs Online, Metodi di pagamento)
-// - ?preview=1 => mostra HTML (non invia email)
-// - ?debug=1   => blocco debug incoming (per location)
+// - ?preview=1 => mostra HTML; ?debug=1 => blocco debug incoming
 
 import { DateTime } from "luxon";
 import { Resend } from "resend";
@@ -31,6 +30,7 @@ const REORDER_MIN_QTY       = Number(process.env.REORDER_MIN_QTY       || 1);
 
 // API versions
 const SHOPIFY_GRAPHQL = `https://${SHOP}/admin/api/2024-10/graphql.json`; // GraphQL
+const SHOPIFY_REST    = (path) => `https://${SHOP}/admin/api/2024-07${path}`; // REST per Transfers/Locations
 
 // ===================================================================
 // Handler
@@ -61,9 +61,7 @@ export default async function handler(req, res) {
     // 3) Aggregazione per variante
     const byVariant = new Map();
     for (const li of lines) {
-      const key =
-        li.variantId ||
-        (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
+      const key = li.variantId || (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
       const prev = byVariant.get(key);
       if (prev) {
         prev.soldQty += li.quantity;
@@ -84,25 +82,26 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4) Inventario on-hand (totale) + Incoming (GraphQL inventoryLevels.incoming)
-    const variantIds = Array.from(byVariant.keys()).filter(
-      (k) => !(k.startsWith("SKU:") || k.startsWith("NAME:"))
-    );
-
+    // 4) Inventario on-hand + Incoming (via Transfers)
+    const variantIds = Array.from(byVariant.keys()).filter(k => !(k.startsWith("SKU:") || k.startsWith("NAME:")));
     let debugIncoming = null;
 
     if (variantIds.length) {
-      // on-hand totale per variante
+      // on-hand totale per variante (GraphQL)
       const inv = await fetchInventoryForVariants(variantIds);
       for (const v of inv) {
         const rec = byVariant.get(v.variantId);
         if (rec) rec.inventoryAvailable = v.totalAvailable;
       }
 
-      // incoming via GraphQL per location
-      const { totals: incomingByVar, levels: incomingLevels } =
-        await fetchIncomingForInventoryItems_GQL(variantIds);
+      // mappa variantId -> inventoryItemId (GID) e numerico
+      const itemMap = await fetchInventoryItemIds(variantIds);          // GID
+      const numericMap = Object.fromEntries(Object.entries(itemMap).map(([vid,gid]) => [vid, gid.split("/").pop()]));
 
+      // incoming via Transfers REST (open + in_transit)
+      const { totals: incomingByVar, meta } = await fetchIncomingViaTransfers(numericMap);
+
+      // scrivi incoming
       for (const [variantId, incoming] of Object.entries(incomingByVar)) {
         const rec = byVariant.get(variantId);
         if (rec) rec.inventoryIncoming = incoming;
@@ -118,7 +117,7 @@ export default async function handler(req, res) {
             variant: rec.variantTitle,
             variantId: vid,
             incoming: incomingByVar[vid] || 0,
-            locations: incomingLevels[vid] || [],
+            transfersCount: meta.count,   // quante transfer lette
           });
         }
       }
@@ -129,9 +128,7 @@ export default async function handler(req, res) {
     const lookLines = await fetchOrdersWithLines(lookStartISO, endISO);
     const lookByVariant = new Map();
     for (const li of lookLines) {
-      const key =
-        li.variantId ||
-        (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
+      const key = li.variantId || (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
       lookByVariant.set(key, (lookByVariant.get(key) || 0) + (li.quantity || 0));
     }
 
@@ -142,7 +139,7 @@ export default async function handler(req, res) {
       channelTotals[li.channel].revenue += li.lineRevenue ?? 0;
     }
 
-    const orderIds = Array.from(new Set(lines.map((x) => x.orderId)));
+    const orderIds = Array.from(new Set(lines.map(x => x.orderId)));
     const txByOrder = await fetchTransactionsForOrders(orderIds);
     const paymentTotals = {};
     for (const li of lines) {
@@ -161,9 +158,7 @@ export default async function handler(req, res) {
     }
 
     // 7) Ordinamento e totali
-    const rows = Array.from(byVariant.values()).sort(
-      (a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue
-    );
+    const rows = Array.from(byVariant.values()).sort((a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
     const totals = {
       qty: rows.reduce((s, r) => s + r.soldQty, 0),
       revenue: rows.reduce((s, r) => s + r.revenue, 0),
@@ -182,12 +177,8 @@ export default async function handler(req, res) {
       channelTotals,
       paymentTotals,
       debugIncoming,
-      debugMeta: {}, // (info extra se vuoi)
-      money: (n) =>
-        new Intl.NumberFormat(LOCALE, {
-          style: "currency",
-          currency: CURRENCY,
-        }).format(n),
+      debugMeta: {},
+      money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n),
     });
 
     if (PREVIEW) {
@@ -196,9 +187,7 @@ export default async function handler(req, res) {
     }
 
     if (!RESEND_KEY) {
-      return res
-        .status(200)
-        .json({ ok: true, items: rows.length, note: "No RESEND_API_KEY, skipped email" });
+      return res.status(200).json({ ok: true, items: rows.length, note: "No RESEND_API_KEY, skipped email" });
     }
 
     const resend = new Resend(RESEND_KEY);
@@ -245,10 +234,7 @@ function periodLabel(p) {
 async function shopifyGraphQL(query, variables) {
   const res = await fetch(SHOPIFY_GRAPHQL, {
     method: "POST",
-    headers: {
-      "X-Shopify-Access-Token": TOKEN,
-      "Content-Type": "application/json",
-    },
+    headers: { "X-Shopify-Access-Token": TOKEN, "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
   });
   const json = await res.json();
@@ -263,8 +249,7 @@ function parseAmount(x) {
 
 async function fetchOrdersWithLines(startISO, endISO) {
   const q = `financial_status:PAID created_at:>=${startISO} created_at:<=${endISO}`;
-  let cursor = null,
-    hasNext = true;
+  let cursor = null, hasNext = true;
   const out = [];
 
   while (hasNext) {
@@ -281,7 +266,6 @@ async function fetchOrdersWithLines(startISO, endISO) {
                   node {
                     quantity
                     sku
-                    name
                     product { title }
                     variant { id title }
                     originalUnitPriceSet { shopMoney { amount } }
@@ -300,7 +284,7 @@ async function fetchOrdersWithLines(startISO, endISO) {
     for (const e of edges) {
       const orderId = e.node.id;
       const channel = (e.node.sourceName || "").toLowerCase() === "pos" ? "POS" : "ONLINE";
-      for (const li of e.node.lineItems?.edges || []) {
+      for (const li of (e.node.lineItems?.edges || [])) {
         out.push({
           orderId,
           channel,
@@ -321,7 +305,7 @@ async function fetchOrdersWithLines(startISO, endISO) {
   return out;
 }
 
-// Totale on-hand per variante (GraphQL)
+// On-hand per variante (GraphQL)
 async function fetchInventoryForVariants(variantIds) {
   const out = [];
   for (let i = 0; i < variantIds.length; i += 50) {
@@ -334,65 +318,88 @@ async function fetchInventoryForVariants(variantIds) {
       }
     `;
     const data = await shopifyGraphQL(query, { ids });
-    for (const n of data.nodes || []) {
+    for (const n of (data.nodes || [])) {
       if (n) out.push({ variantId: n.id, totalAvailable: n.inventoryQuantity ?? 0 });
     }
   }
   return out;
 }
 
-// Incoming per variante via GraphQL (inventoryLevels.incoming)
-async function fetchIncomingForInventoryItems_GQL(variantIds) {
-  const totals = {};
-  const levels = {};
-
-  for (let i = 0; i < variantIds.length; i += 25) {
-    const ids = variantIds.slice(i, i + 25);
-
+// variantId -> inventoryItemId (GID)
+async function fetchInventoryItemIds(variantIds) {
+  const map = {};
+  for (let i = 0; i < variantIds.length; i += 50) {
+    const ids = variantIds.slice(i, i + 50);
     const query = `
-      query Q($ids:[ID!]!) {
+      query Items($ids:[ID!]!) {
         nodes(ids:$ids) {
-          ... on ProductVariant {
-            id
-            inventoryItem {
-              id
-              inventoryLevels(first:100) {
-                edges {
-                  node {
-                    incoming
-                    location { id name }
-                  }
-                }
-              }
-            }
-          }
+          ... on ProductVariant { id inventoryItem { id } }
         }
       }
     `;
-
     const data = await shopifyGraphQL(query, { ids });
-
-    for (const n of data.nodes || []) {
-      if (!n?.inventoryItem) continue;
-      const vid = n.id;
-      let sum = 0;
-      const arr = [];
-      for (const e of n.inventoryItem.inventoryLevels?.edges || []) {
-        const inc = Number(e.node?.incoming || 0);
-        const loc = e.node?.location;
-        sum += inc;
-        arr.push({
-          locationId: loc?.id || "",
-          name: loc?.name || "",
-          incoming: inc,
-        });
-      }
-      totals[vid] = sum;
-      levels[vid] = arr;
+    for (const n of (data.nodes || [])) {
+      if (n?.inventoryItem?.id) map[n.id] = n.inventoryItem.id;
     }
   }
+  return map;
+}
 
-  return { totals, levels };
+// Incoming via Transfers REST (open + in_transit)
+async function fetchIncomingViaTransfers(variantIdToNumericItemId) {
+  // reverse: itemNum -> variantId
+  const reverse = {};
+  for (const [vid, num] of Object.entries(variantIdToNumericItemId)) reverse[String(num)] = vid;
+
+  const totals = {}; // variantId -> incoming totale
+  let pageInfo = { next: null };
+  let countTransfers = 0;
+
+  // helper per fetch una pagina di transfers; proviamo stati "open" e "in_transit"
+  const fetchTransfersPage = async (status, pageInfo) => {
+    const params = new URLSearchParams({ status, limit: "50" });
+    if (pageInfo?.next) params.set("page_info", pageInfo.next);
+    const url = `${SHOPIFY_REST(`/transfers.json`)}?${params.toString()}`;
+    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
+    if (!res.ok) return { transfers: [], link: null };
+    const json = await res.json();
+    const link = res.headers.get("link");
+    return { transfers: json.transfers || [], link };
+  };
+
+  const parseNext = (link) => {
+    if (!link) return null;
+    const m = link.match(/<[^>]*page_info=([^&>]+)[^>]*>; rel="next"/);
+    return m ? m[1] : null;
+  };
+
+  // Scarichiamo entrambe le liste (open & in_transit)
+  const statuses = ["open", "in_transit"];
+  for (const st of statuses) {
+    pageInfo = { next: null };
+    do {
+      const { transfers, link } = await fetchTransfersPage(st, pageInfo);
+      countTransfers += transfers.length;
+
+      for (const tr of transfers) {
+        const destId = String(tr?.destination_location_id || ""); // se serve in futuro
+        for (const li of (tr?.line_items || [])) {
+          const itemNum = String(li.inventory_item_id || "");
+          const vid = reverse[itemNum];
+          if (!vid) continue;
+
+          const qty = Number(li.quantity || 0);
+          const received = Number(li.received || 0); // campo standard nelle transfer
+          const remaining = Math.max(0, qty - received);
+          totals[vid] = (totals[vid] || 0) + remaining;
+        }
+      }
+
+      pageInfo.next = parseNext(link);
+    } while (pageInfo.next);
+  }
+
+  return { totals, meta: { count: countTransfers } };
 }
 
 // Transazioni per ordine (per gateway/misto) — REST
@@ -400,18 +407,15 @@ async function fetchTransactionsForOrders(orderGids) {
   const result = {};
   for (const gid of orderGids) {
     const num = String(gid).split("/").pop();
-    const url = `https://${SHOP}/admin/api/2024-10/orders/${num}/transactions.json`;
+    const url = `${SHOPIFY_REST(`/orders/${num}/transactions.json`)}`;
     try {
       const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
-      if (!res.ok) {
-        result[gid] = [];
-        continue;
-      }
+      if (!res.ok) { result[gid] = []; continue; }
       const json = await res.json();
       result[gid] = (json.transactions || [])
-        .filter((t) => t.status === "success")
-        .map((t) => ({ gateway: String(t.gateway || "unknown"), amount: Number(t.amount || 0) }))
-        .filter((t) => t.amount > 0);
+        .filter(t => t.status === "success")
+        .map(t => ({ gateway: String(t.gateway || "unknown"), amount: Number(t.amount || 0) }))
+        .filter(t => t.amount > 0);
     } catch {
       result[gid] = [];
     }
@@ -424,15 +428,12 @@ async function fetchTransactionsForOrders(orderGids) {
 // ===================================================================
 function computeReorder(rows, lookByVariant) {
   const need = [];
-
   for (const r of rows) {
     if (!r.variantId) continue;
 
-    const key =
-      r.variantId ||
-      (r.sku ? `SKU:${r.sku}` : `NAME:${r.productTitle}__${r.variantTitle}`);
+    const key = r.variantId || (r.sku ? `SKU:${r.sku}` : `NAME:${r.productTitle}__${r.variantTitle}`);
     const soldLook = lookByVariant.get(key) || 0;
-    const vel = soldLook / Math.max(REORDER_LOOKBACK_DAYS, 1); // pezzi/dì (lookback)
+    const vel = soldLook / Math.max(REORDER_LOOKBACK_DAYS, 1); // pezzi/dì
     const onHand = Number(r.inventoryAvailable ?? 0);
     const incoming = Number(r.inventoryIncoming ?? 0);
 
@@ -442,8 +443,7 @@ function computeReorder(rows, lookByVariant) {
     const suggestedRaw = Math.ceil(Math.max(0, target - (onHand + incoming)));
     const suggested = suggestedRaw > 0 ? Math.max(REORDER_MIN_QTY, suggestedRaw) : 0;
 
-    const shouldReorder =
-      coverage <= REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS || onHand + incoming <= rop;
+    const shouldReorder = (coverage <= (REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS)) || ((onHand + incoming) <= rop);
     if (shouldReorder && suggested > 0) {
       need.push({
         productTitle: r.productTitle,
@@ -455,31 +455,18 @@ function computeReorder(rows, lookByVariant) {
         coverage,
         rop,
         target,
-        suggested,
+        suggested
       });
     }
   }
-
-  // prima quelli con copertura più bassa
-  need.sort((a, b) => a.coverage - b.coverage);
+  need.sort((a,b) => a.coverage - b.coverage);
   return need;
 }
 
 // ===================================================================
 // Email rendering
 // ===================================================================
-function renderEmailHTML({
-  period,
-  rangeLabel,
-  rows,
-  totals,
-  reorder,
-  channelTotals,
-  paymentTotals,
-  debugIncoming,
-  debugMeta,
-  money,
-}) {
+function renderEmailHTML({ period, rangeLabel, rows, totals, reorder, channelTotals, paymentTotals, debugIncoming, debugMeta, money }) {
   const style = `
   <style>
     body{font-family:Inter,Arial,sans-serif;color:#111}
@@ -527,9 +514,7 @@ function renderProductsTable(rows, money) {
     <th align="right">Inventario</th>
     <th align="right">En camino</th>
   </tr></thead>`;
-  const body = rows
-    .map(
-      (r) => `
+  const body = rows.map(r => `
     <tr>
       <td>${escapeHtml(r.productTitle)}</td>
       <td>${escapeHtml(r.variantTitle)}</td>
@@ -539,9 +524,7 @@ function renderProductsTable(rows, money) {
       <td align="right">${money(r.revenue)}</td>
       <td align="right">${r.inventoryAvailable ?? ""}</td>
       <td align="right">${r.inventoryIncoming ?? ""}</td>
-    </tr>`
-    )
-    .join("");
+    </tr>`).join("");
   return `<h3>Ventas por producto</h3><table>${head}<tbody>${body}</tbody></table>`;
 }
 
@@ -549,9 +532,7 @@ function renderReorderBlock(list) {
   if (!list || list.length === 0) {
     return `<h3>Riordini consigliati</h3><p class="muted">Nessun articolo critico in base alla copertura.</p>`;
   }
-  const rows = list
-    .map(
-      (it) => `
+  const rows = list.map(it => `
   <tr>
     <td>${escapeHtml(it.productTitle)}</td>
     <td>${escapeHtml(it.variantTitle)}</td>
@@ -563,9 +544,7 @@ function renderReorderBlock(list) {
     <td align="right">${Math.ceil(it.rop)}</td>
     <td align="right">${Math.ceil(it.target)}</td>
     <td align="right"><strong>${it.suggested}</strong></td>
-  </tr>`
-    )
-    .join("");
+  </tr>`).join("");
 
   return `
   <h3>Riordini consigliati</h3>
@@ -588,9 +567,7 @@ function renderReorderBlock(list) {
 }
 
 function renderPaymentsTable(paymentTotals, money) {
-  const entries = Object.entries(paymentTotals).sort(
-    (a, b) => b[1].revenue - a[1].revenue
-  );
+  const entries = Object.entries(paymentTotals).sort((a,b)=>b[1].revenue - a[1].revenue);
   const table = `
   <h3>Métodos de pago</h3>
   <table>
@@ -600,16 +577,12 @@ function renderPaymentsTable(paymentTotals, money) {
       <th align="right">Ingresos</th>
     </tr></thead>
     <tbody>
-      ${entries
-        .map(
-          ([gw, v]) => `
+      ${entries.map(([gw,v]) => `
         <tr>
           <td>${escapeHtml(gatewayLabel(gw))}</td>
           <td align="right">${Math.round(v.qty).toLocaleString("es-MX")}</td>
           <td align="right">${money(v.revenue)}</td>
-        </tr>`
-        )
-        .join("")}
+        </tr>`).join("")}
     </tbody>
   </table>`;
   return table;
@@ -619,65 +592,45 @@ function renderPaymentsTable(paymentTotals, money) {
 function renderAllDonuts(channelTotals, paymentTotals) {
   const segQtyChannel = [
     { label: "Físicas (POS)", value: channelTotals.POS.qty },
-    { label: "Online", value: channelTotals.ONLINE.qty },
+    { label: "Online",        value: channelTotals.ONLINE.qty }
   ];
   const segRevChannel = [
     { label: "Físicas (POS)", value: Math.round(channelTotals.POS.revenue) },
-    { label: "Online", value: Math.round(channelTotals.ONLINE.revenue) },
+    { label: "Online",        value: Math.round(channelTotals.ONLINE.revenue) }
   ];
-  const segRevPay = Object.entries(paymentTotals).map(([gw, v]) => ({
-    label: gatewayLabel(gw),
-    value: Math.round(v.revenue),
-  }));
-  const segQtyPay = Object.entries(paymentTotals).map(([gw, v]) => ({
-    label: gatewayLabel(gw),
-    value: Math.round(v.qty),
-  }));
+  const segRevPay = Object.entries(paymentTotals).map(([gw,v]) => ({ label: gatewayLabel(gw), value: Math.round(v.revenue) }));
+  const segQtyPay = Object.entries(paymentTotals).map(([gw,v]) => ({ label: gatewayLabel(gw), value: Math.round(v.qty) }));
 
   const donutQtyChannel = svgDonut(segQtyChannel, "Piezas por canal");
   const donutRevChannel = svgDonut(segRevChannel, "Ingresos por canal");
-  const donutRevPay = svgDonut(segRevPay, "Ingresos por método de pago");
-  const donutQtyPay = svgDonut(segQtyPay, "Piezas por método de pago");
+  const donutRevPay     = svgDonut(segRevPay,     "Ingresos por método de pago");
+  const donutQtyPay     = svgDonut(segQtyPay,     "Piezas por método de pago");
 
   return `<h3>Gráficos</h3>${donutQtyChannel}${donutRevChannel}${donutRevPay}${donutQtyPay}`;
 }
 
-// DEBUG incoming (GraphQL per location)
-function renderDebugIncoming(debugIncoming, debugMeta) {
+// DEBUG incoming (riassunto)
+function renderDebugIncoming(debugIncoming) {
   if (!debugIncoming) return "";
-  const info = `<p class="muted">Incoming: GraphQL (inventoryLevels)${debugMeta && debugMeta.note ? " • " + escapeHtml(debugMeta.note) : ""}</p>`;
-  if (!debugIncoming.length) return info;
-
-  const rows = debugIncoming
-    .map((d) => {
-      const locs = (d.locations || [])
-        .map((l) => {
-          const short = String(l.locationId || "").split("/").pop();
-          return `${escapeHtml(l.name || "")} (#${escapeHtml(short)}): <b>${l.incoming}</b>`;
-        })
-        .join("<br>");
-      const shortVid = d.variantId ? d.variantId.split("/").pop() : "";
-      return `
-      <tr>
-        <td>${escapeHtml(d.product)}</td>
-        <td>${escapeHtml(d.variant)}</td>
-        <td style="font-family:monospace">${escapeHtml(shortVid)}</td>
-        <td align="right">${d.incoming}</td>
-        <td>${locs || ""}</td>
-      </tr>`;
-    })
-    .join("");
-
+  if (!debugIncoming.length) return `<p class="muted">Incoming via Transfers REST: nessuna transfer rilevata.</p>`;
+  const rows = debugIncoming.map(d => `
+    <tr>
+      <td>${escapeHtml(d.product)}</td>
+      <td>${escapeHtml(d.variant)}</td>
+      <td style="font-family:monospace">${escapeHtml(d.variantId.split("/").pop())}</td>
+      <td align="right">${d.incoming}</td>
+      <td align="right">${d.transfersCount}</td>
+    </tr>`).join("");
   return `
     <h3>DEBUG Incoming (solo con ?debug=1)</h3>
-    ${info}
+    <p class="muted">Fonte: Transfers REST (stati: open, in_transit). Colonna "Transfers lette" = quante transfer totali valutate nella pagina.</p>
     <table>
       <thead><tr>
         <th align="left">Prodotto</th>
         <th align="left">Variante</th>
         <th align="left">Variant ID</th>
         <th align="right">Incoming totale</th>
-        <th align="left">Dettaglio per location</th>
+        <th align="right">Transfers lette</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -700,36 +653,31 @@ function gatewayLabel(key) {
 
 // Donut SVG a colori con legenda
 function svgDonut(segments, title) {
-  const total = segments.reduce((s, x) => s + (x.value || 0), 0) || 1;
-  const radius = 40,
-    circumference = 2 * Math.PI * radius;
+  const total = segments.reduce((s,x)=>s+(x.value||0), 0) || 1;
+  const radius = 40, circumference = 2 * Math.PI * radius;
   let offset = 0;
-  const colors = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#14B8A6"];
+  const colors = ["#2563EB","#10B981","#F59E0B","#EF4444","#8B5CF6","#14B8A6"];
 
-  const rings = segments
-    .map((seg, i) => {
-      const val = seg.value || 0;
-      const len = (val / total) * circumference;
-      const circle = `
+  const rings = segments.map((seg,i)=>{
+    const val = seg.value || 0;
+    const len = (val/total) * circumference;
+    const circle = `
       <circle r="${radius}" cx="50" cy="50" fill="transparent"
         stroke="${colors[i % colors.length]}" stroke-width="16"
         stroke-dasharray="${len} ${circumference - len}" stroke-dashoffset="${-offset}" />`;
-      offset += len;
-      return circle;
-    })
-    .join("");
+    offset += len;
+    return circle;
+  }).join("");
 
-  const legend = segments
-    .map((s, i) => {
-      const val = s.value || 0;
-      const pct = Math.round((val / total) * 100);
-      return `
+  const legend = segments.map((s,i)=>{
+    const val = s.value || 0;
+    const pct = Math.round((val/total)*100);
+    return `
       <div style="display:flex;align-items:center;margin:2px 0;">
         <span style="width:10px;height:10px;display:inline-block;background:${colors[i % colors.length]};margin-right:6px;border-radius:2px;"></span>
         <span>${escapeHtml(String(s.label))}: <strong>${val.toLocaleString("es-MX")}</strong> (${pct}%)</span>
       </div>`;
-    })
-    .join("");
+  }).join("");
 
   return `
   <div style="display:flex;gap:16px;align-items:center;margin:8px 0 12px 0;">
@@ -747,5 +695,5 @@ function svgDonut(segments, title) {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+  return String(s).replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
 }
