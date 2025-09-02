@@ -1,5 +1,30 @@
 {
   "crons": [
-    { "path": "/api/sales-report", "schedule": "05 06 * * *" }
+    {
+      "path": "/api/cron/smart-report",
+      "schedule": "0 8 * * *"
+    }
+  ],
+  "functions": {
+    "api/sales-report.js": {
+      "maxDuration": 60
+    },
+    "api/send-sales-email.js": {
+      "maxDuration": 30
+    },
+    "api/cron/smart-report.js": {
+      "maxDuration": 45
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/sales-report",
+      "headers": [
+        {
+          "key": "Cache-Control", 
+          "value": "public, max-age=300, stale-while-revalidate=600"
+        }
+      ]
+    }
   ]
 }
