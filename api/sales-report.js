@@ -1,4 +1,6 @@
 // /api/sales-report.js
+// v2025-09-01 — Range in TZ negozio, grafici, riordini, incoming (PO→Transfers), email via Resend.
+
 import { DateTime } from "luxon";
 import { Resend } from "resend";
 
@@ -13,7 +15,6 @@ const FROM = process.env.REPORT_FROM_EMAIL;
 // Formattazioni
 const CURRENCY = process.env.REPORT_CURRENCY || "MXN";
 const LOCALE   = process.env.REPORT_LOCALE   || "es-MX";
-const TZ       = "America/Monterrey";
 
 // Reordering (configurabili)
 const REORDER_LOOKBACK_DAYS = Number(process.env.REORDER_LOOKBACK_DAYS || 30);
@@ -27,257 +28,61 @@ const GQL_URL  = `https://${SHOP}/admin/api/2024-10/graphql.json`;
 const REST_URL = (p) => `https://${SHOP}/admin/api/2024-07${p}`;
 
 // ===================================================================
-// Handler
+// Helpers — Shopify + Timezone
 // ===================================================================
-export default async function handler(req, res) {
-  try {
-    if (!SHOP || !TOKEN) {
-      return res.status(400).json({ ok:false, error:"Missing SHOPIFY_SHOP / SHOPIFY_ADMIN_TOKEN" });
-    }
 
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const PERIOD  = (url.searchParams.get("period") || "weekly").toLowerCase(); // daily|weekly|monthly
-    const PREVIEW = url.searchParams.get("preview") === "1";
-    const DEBUG   = url.searchParams.get("debug") === "1";
-    const TODAY   = url.searchParams.get("today") === "1";
-    const CURRENT = url.searchParams.get("current") === "1";
-
-    const nowLocal = DateTime.now().setZone(TZ);
-
-    // 1) Range “a bordo esclusivo”
-    const { start, endExclusive, rangeLabel } = computeRange(PERIOD, nowLocal, {
-      TODAY,
-      CURRENT,
-    });
-    const startISO = start.toUTC().toISO();
-    const endExclusiveISO = endExclusive.toUTC().toISO();
-
-    // 2) Ordini del periodo
-    const lines = await fetchOrdersWithLines(startISO, endExclusiveISO);
-
-    // 3) Aggregazione per variante
-    const byVariant = new Map();
-    for (const li of lines) {
-      const key =
-        li.variantId ||
-        (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
-      const prev = byVariant.get(key);
-      if (prev) {
-        prev.soldQty += li.quantity;
-        prev.revenue += li.lineRevenue ?? 0;
-        if (li.unitPrice != null) prev.unitPrice = li.unitPrice;
-      } else {
-        byVariant.set(key, {
-          variantId: li.variantId || null,
-          productTitle: li.productTitle,
-          variantTitle: li.variantTitle || li.productTitle,
-          sku: li.sku || "",
-          soldQty: li.quantity,
-          unitPrice: li.unitPrice ?? null,
-          revenue: li.lineRevenue ?? 0,
-          inventoryAvailable: null,
-          inventoryIncoming: null,
-        });
-      }
-    }
-
-    // 4) Inventario on-hand + Incoming (PO → fallback Transfers)
-    const variantIds = Array.from(byVariant.keys()).filter(
-      (k) => !(k.startsWith("SKU:") || k.startsWith("NAME:"))
-    );
-
-    let debugIncoming = null;
-
-    if (variantIds.length) {
-      const inv = await fetchInventoryForVariants(variantIds);
-      for (const v of inv) {
-        const rec = byVariant.get(v.variantId);
-        if (rec) rec.inventoryAvailable = v.totalAvailable;
-      }
-
-      const itemGids = await fetchInventoryItemIds(variantIds);
-      const itemNums = Object.fromEntries(
-        Object.entries(itemGids).map(([vid, gid]) => [vid, gid.split("/").pop()])
-      );
-
-      // Incoming via Purchase Orders (ordered + partial)
-      let incomingByVar = {};
-      try {
-        const r = await fetchIncomingViaPurchaseOrders(itemNums);
-        incomingByVar = r.totals || {};
-      } catch (e) {
-        console.warn("PO incoming failed:", e?.message || e);
-      }
-
-      // Fallback alle Transfers se i PO non danno nulla
-      if (!Object.values(incomingByVar).some((v) => v > 0)) {
-        try {
-          const r2 = await fetchIncomingViaTransfers(itemNums);
-          incomingByVar = r2.totals || {};
-        } catch (e) {
-          console.warn("Transfers incoming failed:", e?.message || e);
-        }
-      }
-
-      for (const [variantId, incoming] of Object.entries(incomingByVar)) {
-        const rec = byVariant.get(variantId);
-        if (rec) rec.inventoryIncoming = incoming;
-      }
-
-      if (DEBUG) {
-        debugIncoming = [];
-        for (const vid of variantIds) {
-          const rec = byVariant.get(vid);
-          if (!rec) continue;
-          debugIncoming.push({
-            product: rec.productTitle,
-            variant: rec.variantTitle,
-            variantId: vid,
-            incoming: Number(rec.inventoryIncoming || 0),
-          });
-        }
-      }
-    }
-
-    // 5) Lookback per velocità di vendita (riordini)
-    const lookStartISO = endExclusive.minus({ days: REORDER_LOOKBACK_DAYS })
-      .toUTC()
-      .toISO();
-    const lookLines = await fetchOrdersWithLines(lookStartISO, endExclusiveISO);
-    const lookByVariant = new Map();
-    for (const li of lookLines) {
-      const key =
-        li.variantId ||
-        (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
-      lookByVariant.set(key, (lookByVariant.get(key) || 0) + (li.quantity || 0));
-    }
-
-    // 6) Canali + Metodi (misto se più gateway nello stesso ordine)
-    const channelTotals = { POS: { qty: 0, revenue: 0 }, ONLINE: { qty: 0, revenue: 0 } };
-    for (const li of lines) {
-      channelTotals[li.channel].qty += li.quantity;
-      channelTotals[li.channel].revenue += li.lineRevenue ?? 0;
-    }
-    const orderIds = Array.from(new Set(lines.map((x) => x.orderId)));
-    const txByOrder = await fetchTransactionsForOrders(orderIds);
-    const paymentTotals = {};
-    for (const li of lines) {
-      const txs = txByOrder[li.orderId] || [];
-      if (txs.length > 1) {
-        (paymentTotals["mixto"] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
-        paymentTotals["mixto"].revenue += li.lineRevenue ?? 0;
-      } else if (txs.length === 1) {
-        const g = txs[0].gateway || "unknown";
-        (paymentTotals[g] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
-        paymentTotals[g].revenue += li.lineRevenue ?? 0;
-      } else {
-        (paymentTotals["unknown"] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
-        paymentTotals["unknown"].revenue += li.lineRevenue ?? 0;
-      }
-    }
-
-    // 7) Ordinamento e totali
-    const rows = Array.from(byVariant.values()).sort(
-      (a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue
-    );
-    const totals = {
-      qty: rows.reduce((s, r) => s + r.soldQty, 0),
-      revenue: rows.reduce((s, r) => s + r.revenue, 0),
-    };
-
-    // 8) Riordini consigliati
-    const reorder = computeReorder(rows, lookByVariant);
-
-    // 9) Render HTML
-    const html = renderEmailHTML({
-      period: PERIOD,
-      rangeLabel,
-      rows,
-      totals,
-      reorder,
-      channelTotals,
-      paymentTotals,
-      debugIncoming,
-      money: (n) =>
-        new Intl.NumberFormat(LOCALE, {
-          style: "currency",
-          currency: CURRENCY,
-        }).format(n),
-    });
-
-    if (PREVIEW) {
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      return res.status(200).send(html);
-    }
-
-    if (!RESEND_KEY || !TO || !FROM) {
-      return res
-        .status(200)
-        .json({ ok: true, items: rows.length, note: "No email (missing RESEND/TO/FROM)" });
-    }
-
-    const resend = new Resend(RESEND_KEY);
-    await resend.emails.send({
-      from: FROM,
-      to: TO,
-      subject: `Reporte ${periodLabel(PERIOD)} — ${rangeLabel}`,
-      html,
-    });
-
-    return res.status(200).json({ ok: true, sent: true, items: rows.length });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
+// Legge il fuso IANA reale dello shop (es. "America/Monterrey")
+async function fetchShopTimezone() {
+  const res = await fetch(REST_URL(`/shop.json`), {
+    headers: { "X-Shopify-Access-Token": TOKEN },
+  });
+  if (!res.ok) throw new Error(`Shop REST /shop.json ${res.status}`);
+  const { shop } = await res.json();
+  return shop.iana_timezone || shop.timezone || "UTC";
 }
 
-// ===================================================================
-// Range “a bordo esclusivo” (niente sforamento al giorno dopo)
-// ===================================================================
-function computeRange(period, nowLocal, { TODAY = false, CURRENT = false } = {}) {
+// Costruisce i range [start, endExclusive) nel fuso del negozio
+async function computeRangeWithShopTZ(period, { TODAY=false, CURRENT=false } = {}) {
+  const shopTZ = await fetchShopTimezone();
+  const nowLocal = DateTime.now().setZone(shopTZ);
+
   if (period === "daily") {
     if (TODAY) {
       const start = nowLocal.startOf("day");
       const endExclusive = nowLocal;
-      return { start, endExclusive, rangeLabel: `Hoy ${start.toFormat("dd LLL yyyy")}` };
+      return { start, endExclusive, tz: shopTZ,
+        label: `Hoy ${start.toFormat("dd LLL yyyy")}` };
     }
     const start = nowLocal.minus({ days: 1 }).startOf("day");
-    const endExclusive = start.plus({ days: 1 });
-    return { start, endExclusive, rangeLabel: `Ayer ${start.toFormat("dd LLL yyyy")}` };
+    const endExclusive = nowLocal.startOf("day");
+    return { start, endExclusive, tz: shopTZ,
+      label: `Ayer ${start.toFormat("dd LLL yyyy")}` };
   }
 
   if (period === "weekly") {
     if (CURRENT) {
       const start = nowLocal.startOf("week");
       const endExclusive = nowLocal;
-      return {
-        start,
-        endExclusive,
-        rangeLabel: `Semana ${start.toFormat("dd LLL")} – ${endExclusive.toFormat("dd LLL yyyy")}`,
-      };
+      return { start, endExclusive, tz: shopTZ,
+        label: `Semana ${start.toFormat("dd LLL")} – ${endExclusive.toFormat("dd LLL yyyy")}` };
     }
     const endExclusive = nowLocal.startOf("week");
     const start = endExclusive.minus({ weeks: 1 });
-    return {
-      start,
-      endExclusive,
-      rangeLabel: `Semana ${start.toFormat("dd LLL")} – ${endExclusive.minus({ seconds: 1 }).toFormat("dd LLL yyyy")}`,
-    };
+    return { start, endExclusive, tz: shopTZ,
+      label: `Semana ${start.toFormat("dd LLL")} – ${endExclusive.minus({seconds:1}).toFormat("dd LLL yyyy")}` };
   }
 
   // monthly
   if (CURRENT) {
     const start = nowLocal.startOf("month");
     const endExclusive = nowLocal;
-    return { start, endExclusive, rangeLabel: `Mes ${start.toFormat("LLLL yyyy")} (parcial)` };
+    return { start, endExclusive, tz: shopTZ,
+      label: `Mes ${start.toFormat("LLLL yyyy")} (parcial)` };
   }
   const endExclusive = nowLocal.startOf("month");
   const start = endExclusive.minus({ months: 1 });
-  return { start, endExclusive, rangeLabel: `Mes ${start.toFormat("LLLL yyyy")}` };
-}
-
-function periodLabel(p) {
-  return p === "daily" ? "diario" : p === "weekly" ? "semanal" : "mensual";
+  return { start, endExclusive, tz: shopTZ,
+    label: `Mes ${start.toFormat("LLLL yyyy")}` };
 }
 
 // ===================================================================
@@ -302,11 +107,10 @@ function parseAmount(x) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// Usa filtro esclusivo sul “fine”
+// Usa filtro esclusivo sul “fine”: created_at >= startUTC AND < endUTC
 async function fetchOrdersWithLines(startISO, endExclusiveISO) {
   const q = `financial_status:PAID created_at:>=${startISO} created_at:<${endExclusiveISO}`;
-  let cursor = null,
-    hasNext = true;
+  let cursor = null, hasNext = true;
   const out = [];
 
   while (hasNext) {
@@ -494,21 +298,13 @@ async function fetchTransactionsForOrders(orderGids) {
     const url = REST_URL(`/orders/${num}/transactions.json`);
     try {
       const res = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
-      if (!res.ok) {
-        result[gid] = [];
-        continue;
-      }
+      if (!res.ok) { result[gid] = []; continue; }
       const json = await res.json();
       result[gid] = (json.transactions || [])
         .filter((t) => t.status === "success")
-        .map((t) => ({
-          gateway: String(t.gateway || "unknown"),
-          amount: Number(t.amount || 0),
-        }))
+        .map((t) => ({ gateway: String(t.gateway || "unknown"), amount: Number(t.amount || 0) }))
         .filter((t) => t.amount > 0);
-    } catch {
-      result[gid] = [];
-    }
+    } catch { result[gid] = []; }
   }
   return result;
 }
@@ -518,13 +314,9 @@ async function fetchTransactionsForOrders(orderGids) {
 // ===================================================================
 function computeReorder(rows, lookByVariant) {
   const need = [];
-
   for (const r of rows) {
     if (!r.variantId) continue;
-
-    const key =
-      r.variantId ||
-      (r.sku ? `SKU:${r.sku}` : `NAME:${r.productTitle}__${r.variantTitle}`);
+    const key = r.variantId || (r.sku ? `SKU:${r.sku}` : `NAME:${r.productTitle}__${r.variantTitle}`);
     const soldLook = lookByVariant.get(key) || 0;
     const vel = soldLook / Math.max(REORDER_LOOKBACK_DAYS, 1); // pezzi/dì
     const onHand = Number(r.inventoryAvailable ?? 0);
@@ -537,8 +329,7 @@ function computeReorder(rows, lookByVariant) {
     const suggested = suggestedRaw > 0 ? Math.max(REORDER_MIN_QTY, suggestedRaw) : 0;
 
     const shouldReorder =
-      coverage <= REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS ||
-      onHand + incoming <= rop;
+      coverage <= REORDER_LEAD_DAYS + REORDER_SAFETY_DAYS || onHand + incoming <= rop;
     if (shouldReorder && suggested > 0) {
       need.push({
         productTitle: r.productTitle,
@@ -554,7 +345,6 @@ function computeReorder(rows, lookByVariant) {
       });
     }
   }
-
   need.sort((a, b) => a.coverage - b.coverage);
   return need;
 }
@@ -563,15 +353,8 @@ function computeReorder(rows, lookByVariant) {
 // Email rendering
 // ===================================================================
 function renderEmailHTML({
-  period,
-  rangeLabel,
-  rows,
-  totals,
-  reorder,
-  channelTotals,
-  paymentTotals,
-  debugIncoming,
-  money,
+  period, rangeLabel, rows, totals, reorder,
+  channelTotals, paymentTotals, debugIncoming, money,
 }) {
   const style = `
   <style>
@@ -620,9 +403,7 @@ function renderProductsTable(rows, money) {
     <th align="right">Inventario</th>
     <th align="right">En camino</th>
   </tr></thead>`;
-  const body = rows
-    .map(
-      (r) => `
+  const body = rows.map(r => `
     <tr>
       <td>${escapeHtml(r.productTitle)}</td>
       <td>${escapeHtml(r.variantTitle)}</td>
@@ -632,9 +413,7 @@ function renderProductsTable(rows, money) {
       <td align="right">${money(r.revenue)}</td>
       <td align="right">${r.inventoryAvailable ?? ""}</td>
       <td align="right">${r.inventoryIncoming ?? ""}</td>
-    </tr>`
-    )
-    .join("");
+    </tr>`).join("");
   return `<h3>Ventas por producto</h3><table>${head}<tbody>${body}</tbody></table>`;
 }
 
@@ -642,9 +421,7 @@ function renderReorderBlock(list) {
   if (!list || list.length === 0) {
     return `<h3>Riordini consigliati</h3><p class="muted">Nessun articolo critico in base alla copertura.</p>`;
   }
-  const rows = list
-    .map(
-      (it) => `
+  const rows = list.map(it => `
   <tr>
     <td>${escapeHtml(it.productTitle)}</td>
     <td>${escapeHtml(it.variantTitle)}</td>
@@ -656,9 +433,7 @@ function renderReorderBlock(list) {
     <td align="right">${Math.ceil(it.rop)}</td>
     <td align="right">${Math.ceil(it.target)}</td>
     <td align="right"><strong>${it.suggested}</strong></td>
-  </tr>`
-    )
-    .join("");
+  </tr>`).join("");
 
   return `
   <h3>Riordini consigliati</h3>
@@ -681,9 +456,7 @@ function renderReorderBlock(list) {
 }
 
 function renderPaymentsTable(paymentTotals, money) {
-  const entries = Object.entries(paymentTotals).sort(
-    (a, b) => b[1].revenue - a[1].revenue
-  );
+  const entries = Object.entries(paymentTotals).sort((a, b) => b[1].revenue - a[1].revenue);
   const table = `
   <h3>Métodos de pago</h3>
   <table>
@@ -693,16 +466,12 @@ function renderPaymentsTable(paymentTotals, money) {
       <th align="right">Ingresos</th>
     </tr></thead>
     <tbody>
-      ${entries
-        .map(
-          ([gw, v]) => `
+      ${entries.map(([gw, v]) => `
         <tr>
           <td>${escapeHtml(gatewayLabel(gw))}</td>
           <td align="right">${Math.round(v.qty).toLocaleString("es-MX")}</td>
           <td align="right">${money(v.revenue)}</td>
-        </tr>`
-        )
-        .join("")}
+        </tr>`).join("")}
     </tbody>
   </table>`;
   return table;
@@ -719,12 +488,10 @@ function renderAllDonuts(channelTotals, paymentTotals) {
     { label: "Online", value: Math.round(channelTotals.ONLINE.revenue) },
   ];
   const segRevPay = Object.entries(paymentTotals).map(([gw, v]) => ({
-    label: gatewayLabel(gw),
-    value: Math.round(v.revenue),
+    label: gatewayLabel(gw), value: Math.round(v.revenue),
   }));
   const segQtyPay = Object.entries(paymentTotals).map(([gw, v]) => ({
-    label: gatewayLabel(gw),
-    value: Math.round(v.qty),
+    label: gatewayLabel(gw), value: Math.round(v.qty),
   }));
 
   const donutQtyChannel = svgDonut(segQtyChannel, "Piezas por canal");
@@ -740,17 +507,13 @@ function renderDebugIncoming(debugIncoming) {
   if (!debugIncoming) return "";
   if (!debugIncoming.length)
     return `<p class="muted">Incoming (PO/Transfers): nessuna riga con incoming.</p>`;
-  const rows = debugIncoming
-    .map(
-      (d) => `
+  const rows = debugIncoming.map(d => `
     <tr>
       <td>${escapeHtml(d.product)}</td>
       <td>${escapeHtml(d.variant)}</td>
       <td style="font-family:monospace">${escapeHtml(d.variantId.split("/").pop())}</td>
       <td align="right">${d.incoming}</td>
-    </tr>`
-    )
-    .join("");
+    </tr>`).join("");
   return `
     <h3>DEBUG Incoming (solo con ?debug=1)</h3>
     <table>
@@ -782,37 +545,30 @@ function gatewayLabel(key) {
 // Donut SVG a colori con legenda
 function svgDonut(segments, title) {
   const total = segments.reduce((s, x) => s + (x.value || 0), 0) || 1;
-  const radius = 40,
-    circumference = 2 * Math.PI * radius;
+  const radius = 40, circumference = 2 * Math.PI * radius;
   let offset = 0;
   const colors = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#14B8A6"];
 
-  const rings = segments
-    .map((seg, i) => {
-      const val = seg.value || 0;
-      const len = (val / total) * circumference;
-      const circle = `
+  const rings = segments.map((seg, i) => {
+    const val = seg.value || 0;
+    const len = (val / total) * circumference;
+    const circle = `
       <circle r="${radius}" cx="50" cy="50" fill="transparent"
         stroke="${colors[i % colors.length]}" stroke-width="16"
         stroke-dasharray="${len} ${circumference - len}" stroke-dashoffset="${-offset}" />`;
-      offset += len;
-      return circle;
-    })
-    .join("");
+    offset += len;
+    return circle;
+  }).join("");
 
-  const legend = segments
-    .map((s, i) => {
-      const val = s.value || 0;
-      const pct = Math.round((val / total) * 100);
-      return `
+  const legend = segments.map((s, i) => {
+    const val = s.value || 0;
+    const pct = Math.round((val / total) * 100);
+    return `
       <div style="display:flex;align-items:center;margin:2px 0;">
         <span style="width:10px;height:10px;display:inline-block;background:${colors[i % colors.length]};margin-right:6px;border-radius:2px;"></span>
-        <span>${escapeHtml(String(s.label))}: <strong>${val.toLocaleString(
-          "es-MX"
-        )}</strong> (${pct}%)</span>
+        <span>${escapeHtml(String(s.label))}: <strong>${val.toLocaleString("es-MX")}</strong> (${pct}%)</span>
       </div>`;
-    })
-    .join("");
+  }).join("");
 
   return `
   <div style="display:flex;gap:16px;align-items:center;margin:8px 0 12px 0;">
@@ -821,18 +577,220 @@ function svgDonut(segments, title) {
       ${rings}
       <circle r="${radius - 12}" cx="50" cy="50" fill="white"/>
       <text x="50" y="47" text-anchor="middle" font-size="7" fill="#111"
-        style="transform:rotate(90deg);transform-origin:50px 50px;">${escapeHtml(
-          title
-        )}</text>
+        style="transform:rotate(90deg);transform-origin:50px 50px;">${escapeHtml(title)}</text>
       <text x="50" y="58" text-anchor="middle" font-size="7" fill="#6B7280"
-        style="transform:rotate(90deg);transform-origin:50px 50px;">Total ${total.toLocaleString(
-          "es-MX"
-        )}</text>
+        style="transform:rotate(90deg);transform-origin:50px 50px;">Total ${total.toLocaleString("es-MX")}</text>
     </svg>
     <div style="font-size:12px;color:#111;line-height:1.35">${legend}</div>
   </div>`;
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+  return String(s).replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
 }
+
+// ===================================================================
+// Handler
+// ===================================================================
+export default async function handler(req, res) {
+  try {
+    if (!SHOP || !TOKEN) {
+      return res.status(400).json({ ok:false, error:"Missing SHOPIFY_SHOP / SHOPIFY_ADMIN_TOKEN" });
+    }
+
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const PERIOD  = (url.searchParams.get("period") || "weekly").toLowerCase(); // daily|weekly|monthly
+    const PREVIEW = url.searchParams.get("preview") === "1";
+    const DEBUG   = url.searchParams.get("debug") === "1";
+    const TODAY   = url.searchParams.get("today") === "1";
+    const CURRENT = url.searchParams.get("current") === "1";
+
+    // 1) Range in TZ negozio, poi UTC per la query
+    const { start, endExclusive, tz:shopTZ, label } =
+      await computeRangeWithShopTZ(PERIOD, { TODAY, CURRENT });
+
+    const startISO = start.toUTC().toISO();
+    const endExclusiveISO = endExclusive.toUTC().toISO();
+
+    if (DEBUG) {
+      console.log("FILTER", {
+        tz: shopTZ,
+        startLocal: start.toISO(),
+        endExclusiveLocal: endExclusive.toISO(),
+        startUTC: startISO,
+        endExclusiveUTC: endExclusiveISO,
+        period: PERIOD, TODAY, CURRENT
+      });
+    }
+
+    // 2) Ordini del periodo
+    const lines = await fetchOrdersWithLines(startISO, endExclusiveISO);
+
+    // 3) Aggregazione per variante
+    const byVariant = new Map();
+    for (const li of lines) {
+      const key =
+        li.variantId ||
+        (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
+      const prev = byVariant.get(key);
+      if (prev) {
+        prev.soldQty += li.quantity;
+        prev.revenue += li.lineRevenue ?? 0;
+        if (li.unitPrice != null) prev.unitPrice = li.unitPrice;
+      } else {
+        byVariant.set(key, {
+          variantId: li.variantId || null,
+          productTitle: li.productTitle,
+          variantTitle: li.variantTitle || li.productTitle,
+          sku: li.sku || "",
+          soldQty: li.quantity,
+          unitPrice: li.unitPrice ?? null,
+          revenue: li.lineRevenue ?? 0,
+          inventoryAvailable: null,
+          inventoryIncoming: null,
+        });
+      }
+    }
+
+    // 4) Inventario on-hand + Incoming (PO → fallback Transfers)
+    const variantIds = Array.from(byVariant.keys()).filter(
+      (k) => !(k.startsWith("SKU:") || k.startsWith("NAME:"))
+    );
+
+    let debugIncoming = null;
+
+    if (variantIds.length) {
+      const inv = await fetchInventoryForVariants(variantIds);
+      for (const v of inv) {
+        const rec = byVariant.get(v.variantId);
+        if (rec) rec.inventoryAvailable = v.totalAvailable;
+      }
+
+      const itemGids = await fetchInventoryItemIds(variantIds);
+      const itemNums = Object.fromEntries(
+        Object.entries(itemGids).map(([vid, gid]) => [vid, gid.split("/").pop()])
+      );
+
+      // Incoming via Purchase Orders (solo se API disponibili)
+      let incomingByVar = {};
+      try {
+        const r = await fetchIncomingViaPurchaseOrders(itemNums);
+        incomingByVar = r.totals || {};
+      } catch (e) {
+        if (DEBUG) console.warn("PO incoming failed:", e?.message || e);
+      }
+
+      if (!Object.values(incomingByVar).some((v) => v > 0)) {
+        try {
+          const r2 = await fetchIncomingViaTransfers(itemNums);
+          incomingByVar = r2.totals || {};
+        } catch (e) {
+          if (DEBUG) console.warn("Transfers incoming failed:", e?.message || e);
+        }
+      }
+
+      for (const [variantId, incoming] of Object.entries(incomingByVar)) {
+        const rec = byVariant.get(variantId);
+        if (rec) rec.inventoryIncoming = incoming;
+      }
+
+      if (DEBUG) {
+        debugIncoming = [];
+        for (const vid of variantIds) {
+          const rec = byVariant.get(vid);
+          if (!rec) continue;
+          debugIncoming.push({
+            product: rec.productTitle,
+            variant: rec.variantTitle,
+            variantId: vid,
+            incoming: Number(rec.inventoryIncoming || 0),
+          });
+        }
+      }
+    }
+
+    // 5) Lookback per velocità di vendita (riordini)
+    const lookStartISO = endExclusive.minus({ days: REORDER_LOOKBACK_DAYS }).toUTC().toISO();
+    const lookLines = await fetchOrdersWithLines(lookStartISO, endExclusiveISO);
+    const lookByVariant = new Map();
+    for (const li of lookLines) {
+      const key =
+        li.variantId ||
+        (li.sku ? `SKU:${li.sku}` : `NAME:${li.productTitle}__${li.variantTitle}`);
+      lookByVariant.set(key, (lookByVariant.get(key) || 0) + (li.quantity || 0));
+    }
+
+    // 6) Canali + Metodi (misto se più gateway nello stesso ordine)
+    const channelTotals = { POS: { qty: 0, revenue: 0 }, ONLINE: { qty: 0, revenue: 0 } };
+    for (const li of lines) {
+      channelTotals[li.channel].qty += li.quantity;
+      channelTotals[li.channel].revenue += li.lineRevenue ?? 0;
+    }
+    const orderIds = Array.from(new Set(lines.map((x) => x.orderId)));
+    const txByOrder = await fetchTransactionsForOrders(orderIds);
+    const paymentTotals = {};
+    for (const li of lines) {
+      const txs = txByOrder[li.orderId] || [];
+      if (txs.length > 1) {
+        (paymentTotals["mixto"] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
+        paymentTotals["mixto"].revenue += li.lineRevenue ?? 0;
+      } else if (txs.length === 1) {
+        const g = txs[0].gateway || "unknown";
+        (paymentTotals[g] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
+        paymentTotals[g].revenue += li.lineRevenue ?? 0;
+      } else {
+        (paymentTotals["unknown"] ??= { qty: 0, revenue: 0 }).qty += li.quantity;
+        paymentTotals["unknown"].revenue += li.lineRevenue ?? 0;
+      }
+    }
+
+    // 7) Ordinamento e totali
+    const rows = Array.from(byVariant.values()).sort(
+      (a, b) => b.soldQty - a.soldQty || b.revenue - a.revenue
+    );
+    const totals = {
+      qty: rows.reduce((s, r) => s + r.soldQty, 0),
+      revenue: rows.reduce((s, r) => s + r.revenue, 0),
+    };
+
+    // 8) Riordini consigliati
+    const reorder = computeReorder(rows, lookByVariant);
+
+    // 9) Render HTML
+    const html = renderEmailHTML({
+      period: PERIOD,
+      rangeLabel: label,
+      rows,
+      totals,
+      reorder,
+      channelTotals,
+      paymentTotals,
+      debugIncoming,
+      money: (n) => new Intl.NumberFormat(LOCALE, { style: "currency", currency: CURRENCY }).format(n),
+    });
+
+    if (PREVIEW) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(200).send(html);
+    }
+
+    if (!RESEND_KEY || !TO || !FROM) {
+      return res.status(200).json({ ok: true, items: rows.length, note: "No email (missing RESEND/TO/FROM)" });
+    }
+
+    const resend = new Resend(RESEND_KEY);
+    await resend.emails.send({
+      from: FROM,
+      to: TO,
+      subject: `Reporte ${periodLabel(PERIOD)} — ${label}`,
+      html,
+    });
+
+    return res.status(200).json({ ok: true, sent: true, items: rows.length });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+}
+
+function periodLabel(p) { return p === "daily" ? "diario" : p === "weekly" ? "semanal" : "mensual"; }
