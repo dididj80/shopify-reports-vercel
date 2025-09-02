@@ -1,14 +1,13 @@
-// /api/sales-report.js - Versione finale con cache ottimizzata
+// /api/sales-report.js - Versione COMPLETA con tutte le funzionalità
 import { DateTime } from "luxon";
 
-// CACHE IN-MEMORY ottimizzata
+// CACHE ottimizzata
 const reportCache = new Map();
-
 function getCacheTTL(period, today) {
-  if (today) return 3 * 60 * 1000;        // "Oggi": 3 minuti (live)
-  if (period === "daily") return 10 * 60 * 1000;   // "Ieri": 10 minuti
-  if (period === "weekly") return 30 * 60 * 1000;  // "Settimana": 30 minuti
-  return 60 * 60 * 1000;                           // "Mese": 1 ora
+  if (today) return 3 * 60 * 1000;
+  if (period === "daily") return 10 * 60 * 1000;
+  if (period === "weekly") return 30 * 60 * 1000;
+  return 60 * 60 * 1000;
 }
 
 function getCacheKey(period, today, start, end) {
@@ -19,15 +18,11 @@ function getCacheKey(period, today, start, end) {
 function getFromCache(key, ttl) {
   const cached = reportCache.get(key);
   if (!cached) return null;
-  
   const age = Date.now() - cached.timestamp;
   if (age > ttl) {
     reportCache.delete(key);
-    console.log(`🗑️  Cache expired: ${key} (${Math.floor(age/1000)}s)`);
     return null;
   }
-  
-  console.log(`⚡ Cache HIT: ${key} (${Math.floor(age/1000)}s old)`);
   return { ...cached.data, cached: true, cacheAge: Math.floor(age/1000) };
 }
 
@@ -36,12 +31,10 @@ function setCache(key, data, ttl) {
     const oldest = reportCache.keys().next().value;
     reportCache.delete(oldest);
   }
-  
   reportCache.set(key, { data, timestamp: Date.now() });
-  console.log(`💾 Cache SET: ${key} (TTL: ${Math.floor(ttl/1000/60)}min)`);
 }
 
-// SHOPIFY API HELPERS
+// SHOPIFY API
 const SHOP = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
@@ -102,16 +95,13 @@ async function fetchOrdersPaidInRange(start, end) {
   
   for (;;) {
     if (pageCount++ > 100) break;
-    
     const { json, link } = await fetchWithHeaders(url);
     const orders = json.orders || [];
     out.push(...orders);
-    
     const next = parseNext(link);
     if (!next) break;
     url = REST(`/orders.json?${next}`);
   }
-  
   return out;
 
   function parseNext(linkHeader) {
@@ -123,8 +113,55 @@ async function fetchOrdersPaidInRange(start, end) {
   }
 }
 
-// ELABORAZIONE PRODOTTI
-function processProducts(orders) {
+// CHUNK helper
+const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>arr.slice(i*n,(i+1)*n));
+
+// FETCH VARIANTS con inventory
+async function fetchVariantsByIds(variantIds) {
+  const ids = [...new Set(variantIds.filter(Boolean))];
+  const out = new Map();
+  
+  for (const c of chunk(ids, 50)) {
+    try {
+      const { variants } = await shopFetchJson(REST(`/variants.json?ids=${encodeURIComponent(c.join(","))}`));
+      for (const v of variants || []) {
+        out.set(String(v.id), {
+          inventory_item_id: v.inventory_item_id,
+          inventory_quantity: v.inventory_quantity,
+          inventory_management: v.inventory_management || "",
+          sku: v.sku || "",
+          price: v.price || "0",
+          compare_at_price: v.compare_at_price
+        });
+      }
+    } catch (err) {
+      console.error(`Error fetch variants:`, err.message);
+    }
+  }
+  return out;
+}
+
+// FETCH INVENTORY LEVELS
+async function fetchInventoryLevelsForItems(itemIds) {
+  const ids = [...new Set(itemIds.filter(Boolean).map(String))];
+  const res = Object.create(null);
+  
+  for (const c of chunk(ids, 50)) {
+    try {
+      const { inventory_levels } = await shopFetchJson(REST(`/inventory_levels.json?inventory_item_ids=${encodeURIComponent(c.join(","))}`));
+      for (const lvl of inventory_levels || []) {
+        const key = String(lvl.inventory_item_id);
+        res[key] = (res[key] || 0) + Number(lvl.available ?? 0);
+      }
+    } catch (err) {
+      console.error(`Error fetch inventory:`, err.message);
+    }
+  }
+  return res;
+}
+
+// ELABORAZIONE PRODOTTI COMPLETA
+async function processProductsComplete(orders) {
   const byVariant = new Map();
   const variantIds = new Set();
   
@@ -138,7 +175,9 @@ function processProducts(orders) {
         unitPrice: Number(li.price || 0),
         soldQty: 0, 
         revenue: 0,
-        variantId: li.variant_id || null
+        variantId: li.variant_id || null,
+        inventory_item_id: li.inventory_item_id || null,
+        inventoryAvailable: null
       };
       
       prev.soldQty += Number(li.quantity || 0);
@@ -149,8 +188,39 @@ function processProducts(orders) {
     }
   }
   
-  const rows = Array.from(byVariant.values())
-    .sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
+  const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
+  
+  // FETCH VARIANT INFO
+  if (variantIds.size > 0) {
+    const variantInfo = await fetchVariantsByIds([...variantIds]);
+    
+    for (const r of rows) {
+      const info = r.variantId ? variantInfo.get(String(r.variantId)) : null;
+      if (info) {
+        if (!r.inventory_item_id) r.inventory_item_id = info.inventory_item_id || null;
+        r._variantFallbackQty = info.inventory_quantity;
+        r._variantMgmt = info.inventory_management;
+        r.compare_at_price = info.compare_at_price;
+      }
+    }
+  }
+
+  // FETCH INVENTORY LEVELS
+  const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
+  if (itemIds.length > 0) {
+    const invLevels = await fetchInventoryLevelsForItems(itemIds);
+    
+    for (const r of rows) {
+      const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
+      if (iid && invLevels[iid] != null) {
+        r.inventoryAvailable = invLevels[iid];
+      } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
+        r.inventoryAvailable = r._variantFallbackQty;
+      } else {
+        r.inventoryAvailable = 0;
+      }
+    }
+  }
     
   return { rows, variantIds: [...variantIds] };
 }
@@ -185,220 +255,420 @@ function calculateConversions(orders) {
   }).sort((a,b) => b.orders - a.orders);
 }
 
-// GRAFICI ottimizzati (2 principali)
-function generateCharts(orders, isEmail = false) {
-  const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
+// DEAD STOCK DETECTION
+async function detectDeadStock(variantIds, now) {
+  try {
+    const deadStockDays = 60;
+    const cutoffDate = now.minus({days: deadStockDays});
+    
+    const orders60 = await fetchOrdersPaidInRange(cutoffDate.startOf("day"), now.endOf("day"));
+    
+    const soldVariants = new Set();
+    for (const o of orders60) {
+      for (const li of o.line_items || []) {
+        if (li.variant_id) soldVariants.add(String(li.variant_id));
+      }
+    }
+    
+    const deadVariantIds = variantIds.filter(id => !soldVariants.has(String(id)));
+    if (deadVariantIds.length === 0) return [];
+    
+    const deadVariantInfo = await fetchVariantsByIds(deadVariantIds);
+    const deadItemIds = Array.from(deadVariantInfo.values()).map(v => v.inventory_item_id).filter(Boolean);
+    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds);
+    
+    return deadVariantIds.map(vid => {
+      const info = deadVariantInfo.get(String(vid));
+      if (!info) return null;
+      
+      const itemId = String(info.inventory_item_id);
+      const quantity = deadInventory[itemId] || info.inventory_quantity || 0;
+      const value = quantity * Number(info.price || 0);
+      
+      return {
+        variantId: vid,
+        sku: info.sku || "",
+        quantity,
+        unitPrice: Number(info.price || 0),
+        totalValue: value,
+        daysStagnant: deadStockDays
+      };
+    }).filter(Boolean).filter(item => item.quantity > 0).sort((a,b) => b.totalValue - a.totalValue);
+    
+  } catch (err) {
+    console.error('Error detecting dead stock:', err.message);
+    return [];
+  }
+}
+
+// ROP CALCULATION
+function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
+  const dailyVel = Math.max(0, sales30d/30);
+  const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
+  const target = Math.ceil(dailyVel * (leadDays + safetyDays + 14));
+  const coverage = dailyVel > 0 ? (onHand / dailyVel) : Infinity;
+  const qty = Math.max(0, target - onHand);
   
+  let urgency = 'medium';
+  if (coverage <= leadDays) urgency = 'critical';
+  else if (coverage <= (leadDays + safetyDays)) urgency = 'high';
+  
+  return { 
+    dailyVel: dailyVel.toFixed(2), 
+    rop, target, qty, 
+    coverage: Number.isFinite(coverage) ? coverage.toFixed(1) : '∞',
+    urgency 
+  };
+}
+
+// ABC ANALYSIS
+function computeABCAnalysis(rows) {
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  let cumulativeRevenue = 0;
+  
+  return rows.map((r, index) => {
+    cumulativeRevenue += r.revenue;
+    const cumulativePercent = (cumulativeRevenue / totalRevenue) * 100;
+    
+    let category = 'C';
+    if (cumulativePercent <= 80) category = 'A';
+    else if (cumulativePercent <= 95) category = 'B';
+    
+    return {
+      ...r,
+      rank: index + 1,
+      revenuePercent: ((r.revenue / totalRevenue) * 100).toFixed(1),
+      cumulativePercent: cumulativePercent.toFixed(1),
+      abcCategory: category
+    };
+  });
+}
+
+// 4 GRAFICI COMPLETI
+const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
+
+function donutSVG(parts, size=140) {
+  if (!parts.length || parts.every(p => p.value === 0)) {
+    return `<svg width="${size}" height="${size}"><circle cx="${size/2}" cy="${size/2}" r="${size/2-10}" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="2"/><text x="${size/2}" y="${size/2}" text-anchor="middle" dominant-baseline="central" fill="#9ca3af" font-size="12">Sin datos</text></svg>`;
+  }
+
+  const total = parts.reduce((s,p)=>s+p.value,0) || 1;
+  const r = size/2 - 10, cx=size/2, cy=size/2, w=20;
+  let a0 = -Math.PI/2, segs="";
+  
+  parts.forEach((p, i)=>{
+    const a1 = a0 + (p.value/total)*Math.PI*2;
+    const x0 = cx + r*Math.cos(a0), y0 = cy + r*Math.sin(a0);
+    const x1 = cx + r*Math.cos(a1), y1 = cy + r*Math.sin(a1);
+    const large = (a1-a0) > Math.PI ? 1 : 0;
+    const path = `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} L ${cx + (r-w)*Math.cos(a1)} ${cy + (r-w)*Math.sin(a1)} A ${r-w} ${r-w} 0 ${large} 0 ${cx + (r-w)*Math.cos(a0)} ${cy + (r-w)*Math.sin(a0)} Z`;
+    segs += `<path d="${path}" fill="${PALETTE[i%PALETTE.length]}" stroke="#fff" stroke-width="1" />`;
+    a0 = a1;
+  });
+  
+  const totalLabel = total.toLocaleString("es-MX");
+  segs += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#374151" font-weight="600" font-size="14">${totalLabel}</text>`;
+  
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
+}
+
+function chartsHTML(orders, isEmail = false) {
+  const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
+  const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
+
   // 1) Canali di vendita
   const chObj = {};
   for (const o of orders) {
     const ch = (o.source_name || "unknown").toLowerCase();
     chObj[ch] = (chObj[ch]||0) + pieces(o);
   }
-  
+
   // 2) Tipo di pago
-  const payObj = {};
+  const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
     const hasCard = gws.some(g => g.toLowerCase().includes("stripe") || g.toLowerCase().includes("shopify"));
-    
     const type = hasCash && hasCard ? "Mixto" : hasCash ? "Efectivo" : "Tarjeta";
-    payObj[type] = (payObj[type]||0) + pieces(o);
+    grpObj[type] = (grpObj[type]||0) + pieces(o);
   }
 
-  const size = isEmail ? 100 : 120;
-  
+  // 3) Franjas horarias
+  const hourObj = {};
+  for (const o of orders) {
+    const hour = new Date(o.created_at).getHours();
+    const timeSlot = 
+      hour < 6 ? "Madrugada (00-06)" :
+      hour < 12 ? "Mañana (06-12)" :
+      hour < 18 ? "Tarde (12-18)" :
+      "Noche (18-24)";
+    hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
+  }
+
+  // 4) Rangos de ticket
+  const ticketObj = {};
+  for (const o of orders) {
+    const total = revenue(o);
+    const range = 
+      total < 500 ? "Bajo (<$500)" :
+      total < 1500 ? "Medio ($500-1500)" :
+      total < 3000 ? "Alto ($1500-3000)" :
+      "Premium (>$3000)";
+    ticketObj[range] = (ticketObj[range]||0) + 1;
+  }
+
+  const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
+
+  const sections = [
+    { title:"📦 Canales de venta", parts: top(chObj) },
+    { title:"💰 Tipo de pago", parts: top(grpObj) },
+    { title:"🕐 Horarios de venta", parts: Object.entries(hourObj).map(([k,v])=>({label:k,value:v})) },
+    { title:"🎯 Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
+  ];
+
+  const chartSize = isEmail ? 100 : 140;
+  const gridCols = isEmail ? "repeat(2, 1fr)" : "repeat(auto-fit, minmax(280px, 1fr))";
+
   return `
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0;">
-    ${generateDonutSection("📦 Canales", chObj, size)}
-    ${generateDonutSection("💰 Pagos", payObj, size)}
+  <div style="display:grid;grid-template-columns:${gridCols};gap:${isEmail ? 16 : 24}px;margin:20px 0;" class="charts-container">
+    ${sections.map(sec => `
+      <div style="background:${isEmail ? '#ffffff' : '#fafafa'};border-radius:8px;padding:16px;border:1px solid #e5e7eb;">
+        <h4 style="margin:0 0 12px;color:#374151;font-size:${isEmail ? 13 : 14}px;font-weight:600;">${sec.title}</h4>
+        <div style="text-align:center;">
+          ${donutSVG(sec.parts, chartSize)}
+        </div>
+        <div style="margin-top:12px;font-size:${isEmail ? 10 : 11}px;">
+          ${sec.parts.slice(0, isEmail ? 4 : 8).map((p,i)=>`
+            <div style="display:flex;align-items:center;margin:${isEmail ? 2 : 4}px 0;">
+              <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
+              <span style="flex:1;">${esc(p.label)}</span>
+              <span style="font-weight:600;">${p.value}</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `).join("")}
   </div>`;
 }
 
-function generateDonutSection(title, data, size) {
-  const total = Object.values(data).reduce((s,v)=>s+v,0) || 1;
-  const colors = ["#2563EB", "#10B981", "#F59E0B", "#EF4444"];
+// RENDER FUNCTIONS
+function renderConversionAnalysis(conversionData, isEmail = false) {
+  if (!conversionData.length) return '';
   
   return `
-  <div style="background:#ffffff;border-radius:8px;padding:12px;border:1px solid #e5e7eb;text-align:center;">
-    <h4 style="margin:0 0 8px;font-size:13px;">${title}</h4>
-    <div style="width:${size}px;height:${size}px;border-radius:50%;background:conic-gradient(${
-      Object.entries(data).map(([k,v], i) => {
-        const percent = (v/total) * 100;
-        return `${colors[i]} 0deg ${percent * 3.6}deg`;
-      }).join(', ')
-    });margin:0 auto 8px;display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:12px;">
-      ${total}
-    </div>
-    <div style="font-size:10px;">
-      ${Object.entries(data).slice(0,4).map(([k,v], i) => `
-        <div style="margin:2px 0;">
-          <span style="display:inline-block;width:8px;height:8px;background:${colors[i]};border-radius:50%;margin-right:4px;"></span>
-          ${k}: ${v}
+  <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
+    <h4 style="margin:0 0 12px;color:#0369a1;">🎯 Conversion Rate por Canal</h4>
+    <div style="display:grid;grid-template-columns:repeat(${isEmail ? 2 : 3},1fr);gap:12px;">
+      ${conversionData.slice(0, isEmail ? 4 : 6).map(data => `
+        <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+          <div style="font-weight:600;color:#374151;font-size:${isEmail ? 11 : 12}px;">${data.channel}</div>
+          <div style="font-size:${isEmail ? 16 : 20}px;font-weight:700;color:#0369a1;margin:4px 0;">${data.conversionRate}%</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${data.orders} órdenes</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">AOV: $${data.aov}</div>
         </div>
       `).join('')}
     </div>
   </div>`;
 }
 
-// HTML BUILDER
-function buildHTML(data, isEmail = false) {
-  const { label, tz, now, rows, orders, conversions, comparison, timing } = data;
-  const totQty = rows.reduce((s,r)=>s+r.soldQty,0);
-  const totRev = rows.reduce((s,r)=>s+r.revenue,0);
-  const outOfStock = rows.filter(r => (r.soldQty > 0 && !r.variantId)).length; // Stima
-
-  const headerStyle = isEmail ? 'background:#2563eb;color:white;padding:16px;margin:-16px -16px 16px;' : '';
+function renderDeadStockAlert(deadStockData, isEmail = false) {
+  if (!deadStockData.length) {
+    return `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:20px 0;text-align:center;"><strong style="color:#166534;">✅ ¡Excelente!</strong> No hay productos estancados (sin ventas 60+ días)</div>`;
+  }
   
-  return `<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <title>Sales Report - ${label}</title>
-  <style>
-    body{font-family:Arial,sans-serif;margin:${isEmail?0:20}px;background:#f3f4f6;color:#111}
-    .container{max-width:${isEmail?600:1200}px;margin:0 auto;background:white;padding:16px;border-radius:8px;}
-    table{border-collapse:collapse;width:100%;margin:12px 0}
-    th,td{border:1px solid #e5e7eb;padding:8px;font-size:${isEmail?11:12}px}
-    th{background:#f8fafc;font-weight:600}
-    h1,h2,h3{color:#1f2937;margin:8px 0}
-    .muted{color:#6b7280;font-size:11px}
-    .stats-grid{display:grid;grid-template-columns:repeat(${isEmail?3:5},1fr);gap:12px;margin:16px 0}
-    .stat-card{background:#f8fafc;padding:12px;border-radius:6px;text-align:center}
-    .row-zero{background:#fef2f2}.row-one{background:#fff7ed}
-    .pill-zero{background:#dc2626;color:white;padding:2px 6px;border-radius:8px;font-size:10px}
-    .pill-one{background:#f97316;color:white;padding:2px 6px;border-radius:8px;font-size:10px}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <header style="text-align:center;${headerStyle}">
-      <h1 style="margin:0;${isEmail?'color:white;':''}">📈 Reporte de Ventas</h1>
-      <h2 style="margin:4px 0;${isEmail?'color:#dbeafe;':'color:#4b5563;'}">${esc(label)}</h2>
-      <div class="muted" style="${isEmail?'color:#bfdbfe;':''}">
-        ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
-        ${comparison ? ` • vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? '↗️' : '↘️'} ${Math.abs(comparison.revPercent)}%</strong>` : ''}
-      </div>
-    </header>
-
-    <!-- STATS CARDS -->
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div style="font-size:16px;">📦</div>
-        <div style="font-size:18px;font-weight:700;">${rows.length}</div>
-        <div class="muted">Productos</div>
-      </div>
-      <div class="stat-card">
-        <div style="font-size:16px;">🛍️</div>
-        <div style="font-size:18px;font-weight:700;">${orders.length}</div>
-        <div class="muted">Órdenes</div>
-      </div>
-      <div class="stat-card">
-        <div style="font-size:16px;">💰</div>
-        <div style="font-size:18px;font-weight:700;">${money(totRev/orders.length || 0)}</div>
-        <div class="muted">AOV</div>
-      </div>
-      ${!isEmail ? `
-      <div class="stat-card">
-        <div style="font-size:16px;">🔴</div>
-        <div style="font-size:18px;font-weight:700;color:#dc2626;">${outOfStock}</div>
-        <div class="muted">Sin stock</div>
-      </div>
-      <div class="stat-card">
-        <div style="font-size:16px;">📊</div>
-        <div style="font-size:18px;font-weight:700;">${money(totRev)}</div>
-        <div class="muted">Total</div>
-      </div>
-      ` : ''}
+  const totalValue = deadStockData.reduce((s, item) => s + item.totalValue, 0);
+  const maxItems = isEmail ? 5 : 10;
+  
+  return `
+  <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px;margin:20px 0;">
+    <h4 style="margin:0 0 12px;color:#dc2626;">💀 Dead Stock Alert (60+ días sin ventas)</h4>
+    <div style="background:white;border-radius:6px;padding:12px;margin:12px 0;text-align:center;">
+      <div style="font-size:${isEmail ? 18 : 24}px;font-weight:700;color:#dc2626;">${deadStockData.length}</div>
+      <div style="font-size:${isEmail ? 10 : 12}px;color:#6b7280;">PRODUCTOS ESTANCADOS</div>
+      <div style="font-size:${isEmail ? 11 : 13}px;margin-top:4px;"><strong>Valor total:</strong> ${money(totalValue)}</div>
     </div>
-
-    <!-- CONVERSION RATES -->
-    ${conversions.length ? `
-    <div style="background:#f0f9ff;border:1px solid #bae6fd;padding:12px;border-radius:6px;margin:16px 0;">
-      <h4 style="margin:0 0 8px;color:#0369a1;">🎯 Conversion Rate</h4>
-      <div style="display:grid;grid-template-columns:repeat(${Math.min(conversions.length, isEmail?2:4)},1fr);gap:8px;">
-        ${conversions.slice(0, isEmail?2:4).map(c => `
-          <div style="text-align:center;background:white;padding:8px;border-radius:4px;">
-            <div style="font-weight:600;font-size:11px;">${c.channel}</div>
-            <div style="font-size:16px;font-weight:700;color:#0369a1;">${c.conversionRate}%</div>
-            <div style="font-size:9px;color:#6b7280;">${c.orders} órdenes</div>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-    ` : ''}
-
-    <!-- CHARTS -->
-    ${generateCharts(orders, isEmail)}
-
-    <!-- TOP PRODUCTS TABLE -->
-    <h3>📊 Top productos vendidos</h3>
-    <table>
-      <thead>
-        <tr>
-          <th>Producto</th>
-          <th>Vendidas</th>
-          <th>Ingresos</th>
-          ${!isEmail ? '<th>Stock est.</th>' : ''}
-        </tr>
-      </thead>
+    <table style="width:100%;border-collapse:collapse;font-size:${isEmail ? 10 : 11}px;">
+      <thead><tr style="background:#f8fafc;"><th style="padding:6px;border:1px solid #e5e7eb;">SKU</th><th style="padding:6px;border:1px solid #e5e7eb;">Stock</th><th style="padding:6px;border:1px solid #e5e7eb;">Valor</th></tr></thead>
       <tbody>
-        ${rows.slice(0, isEmail ? 8 : 15).map((r, i) => {
-          const stockClass = i < 3 && r.soldQty > 10 ? ' class="row-zero"' : '';
-          return `
-            <tr${stockClass}>
-              <td>${i+1}. ${esc(r.productTitle)}</td>
-              <td><strong>${r.soldQty}</strong></td>
-              <td><strong>${money(r.revenue)}</strong></td>
-              ${!isEmail ? `<td>${r.soldQty > 20 ? '<span class="pill-zero">Bajo</span>' : r.soldQty > 10 ? '<span class="pill-one">Medio</span>' : 'OK'}</td>` : ''}
-            </tr>
-          `;
-        }).join('')}
-        ${rows.length > (isEmail ? 8 : 15) ? `
-          <tr><td colspan="${isEmail?3:4}" style="text-align:center;color:#6b7280;font-style:italic;">
-            ... y ${rows.length - (isEmail ? 8 : 15)} productos más
-          </td></tr>
-        ` : ''}
+        ${deadStockData.slice(0, maxItems).map(item => `<tr><td style="padding:6px;border:1px solid #e5e7eb;">${item.sku || `ID:${item.variantId}`}</td><td style="padding:6px;border:1px solid #e5e7eb;">${item.quantity}</td><td style="padding:6px;border:1px solid #e5e7eb;font-weight:600;">${money(item.totalValue)}</td></tr>`).join('')}
       </tbody>
     </table>
+  </div>`;
+}
 
-    <!-- DEBUG INFO -->
-    ${!isEmail && data.cached ? `
-      <div style="background:#fef3c7;border:1px solid #fcd34d;padding:12px;border-radius:6px;margin:16px 0;">
-        ⚡ <strong>Datos desde cache</strong> (${data.cacheAge}s old) - 
-        <a href="?debug=1" style="color:#0369a1;">Forzar refresh</a>
-      </div>
-    ` : ''}
-
-    <!-- FOOTER CON LINKS -->
-    <footer style="margin-top:30px;padding-top:16px;border-top:1px solid #e5e7eb;text-align:center;">
-      <div class="muted">
-        <div style="margin-bottom:8px;">
-          <a href="?period=daily&today=1" style="color:#2563eb;">Hoy</a> |
-          <a href="?period=daily" style="color:#2563eb;">Ayer</a> |
-          <a href="?period=weekly" style="color:#2563eb;">Semana</a> |
-          <a href="?period=monthly" style="color:#2563eb;">Mes</a>
-        </div>
-        ${!isEmail ? `
-        <div>
-          Performance: ${timing?.total || 0}ms |
-          <a href="?preview=1" style="color:#10b981;">Preview Email</a>
-        </div>
-        ` : ''}
-      </div>
-    </footer>
-  </div>
+function renderABCSummary(abcData) {
+  const categories = {
+    A: abcData.filter(r => r.abcCategory === 'A'),
+    B: abcData.filter(r => r.abcCategory === 'B'), 
+    C: abcData.filter(r => r.abcCategory === 'C')
+  };
   
-  ${!isEmail && data.today ? `
-  <script>
-    // Auto-refresh ogni 5min per report "oggi"
-    setTimeout(() => window.location.reload(), 5 * 60 * 1000);
-    console.log('🔄 Auto-refresh attivo (5min)');
-  </script>
-  ` : ''}
-</body>
-</html>`;
+  const totalRevenue = abcData.reduce((s, r) => s + r.revenue, 0);
+  
+  return `
+  <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
+    <h4 style="margin:0 0 12px;color:#0369a1;">📊 Análisis ABC (Regla 80/20)</h4>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">
+      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+        <div style="font-size:20px;font-weight:700;color:#dc2626;">A</div>
+        <div style="font-size:12px;color:#6b7280;">TOP PERFORMERS</div>
+        <div><strong>${categories.A.length}</strong> productos</div>
+        <div><strong>${((categories.A.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
+      </div>
+      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+        <div style="font-size:20px;font-weight:700;color:#f97316;">B</div>
+        <div style="font-size:12px;color:#6b7280;">MEDIANOS</div>
+        <div><strong>${categories.B.length}</strong> productos</div>
+        <div><strong>${((categories.B.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
+      </div>
+      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+        <div style="font-size:20px;font-weight:700;color:#6b7280;">C</div>
+        <div style="font-size:12px;color:#6b7280;">COLA LARGA</div>
+        <div><strong>${categories.C.length}</strong> productos</div>
+        <div><strong>${((categories.C.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderProductsTable(rows, isEmail = false) {
+  const maxRows = isEmail ? 15 : 50;
+  const displayRows = rows.slice(0, maxRows);
+  
+  const head = `
+  <thead><tr>
+    <th align="left">Producto</th>
+    <th align="left">Variante</th>
+    ${!isEmail ? '<th align="left">SKU</th>' : ''}
+    <th align="right">Precio</th>
+    <th align="right">Vendidas</th>
+    <th align="right">Ingresos</th>
+    <th align="right">Stock</th>
+  </tr></thead>`;
+  
+  const body = displayRows.map((r, idx)=>{
+    const inv = Number(r.inventoryAvailable ?? 0);
+    const rank = idx + 1;
+    let cls = "";
+    let invCell = String(inv);
+    
+    if (inv === 0) {
+      cls = ' class="row-zero"';
+      invCell = '<span class="pill-zero">0</span>';
+    } else if (inv === 1) {
+      cls = ' class="row-one"';
+      invCell = '<span class="pill-one">1</span>';
+    }
+    
+    const marginPercent = r.compare_at_price && r.unitPrice ? 
+      (((r.compare_at_price - r.unitPrice) / r.compare_at_price) * 100).toFixed(1) + '%' : 
+      '';
+
+    return `
+      <tr${cls}>
+        <td><span class="muted">${rank}.</span> ${esc(r.productTitle)}</td>
+        <td>${esc(r.variantTitle)}</td>
+        ${!isEmail ? `<td>${esc(r.sku||"")}</td>` : ''}
+        <td align="right">${r.unitPrice!=null?esc(money(r.unitPrice)):""}</td>
+        <td align="right"><strong>${r.soldQty}</strong></td>
+        <td align="right"><strong>${esc(money(r.revenue))}</strong></td>
+        <td align="right">${invCell}</td>
+      </tr>`;
+  }).join("");
+  
+  const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos más</div>` : '';
+  
+  return `<h3>📊 Top productos vendidos</h3><table>${head}<tbody>${body}</tbody></table>${moreText}`;
+}
+
+function renderROPTable(rows, isEmail = false) {
+  if (!rows.length) {
+    return `<div style="margin:16px 0;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;text-align:center;"><strong style="color:#166534;">✅ Excelente!</strong> Todos los productos tienen stock suficiente.</div>`;
+  }
+  
+  const maxRows = isEmail ? 10 : 25;
+  const displayRows = rows.slice(0, maxRows);
+  
+  const head = `
+  <thead><tr>
+    <th align="left">Urgencia</th>
+    <th align="left">Producto</th>
+    <th align="left">Variante</th>
+    ${!isEmail ? '<th align="left">SKU</th>' : ''}
+    <th align="right">Stock</th>
+    <th align="right">Vel/día</th>
+    <th align="right">Días restantes</th>
+    <th align="right">🛒 Cantidad</th>
+  </tr></thead>`;
+  
+  const body = displayRows.map(r=>{
+    const urgencyPill = r.urgency === 'critical' ? '<span class="pill-critical">CRÍTICO</span>' :
+                        r.urgency === 'high' ? '<span class="pill-high">ALTO</span>' :
+                        '<span class="pill-medium">MEDIO</span>';
+    
+    const rowClass = r.urgency === 'critical' ? ' class="row-critical"' : '';
+    
+    return `
+      <tr${rowClass}>
+        <td>${urgencyPill}</td>
+        <td>${esc(r.productTitle)}</td>
+        <td>${esc(r.variantTitle)}</td>
+        ${!isEmail ? `<td>${esc(r.sku||"")}</td>` : ''}
+        <td align="right">${r.onHand ?? ""}</td>
+        <td align="right">${r.dailyVel}</td>
+        <td align="right">${r.coverage}d</td>
+        <td align="right"><strong style="color:#dc2626;">${r.qty}</strong></td>
+      </tr>`;
+  }).join("");
+  
+  const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos más para reordenar</div>` : '';
+  
+  return `<h3>🔄 Productos para reordenar</h3>
+    <div style="color:#6b7280;margin-bottom:12px;">Ventana: 30d • Lead time: 7d • Safety: 3d</div>
+    <table>${head}<tbody>${body}</tbody></table>${moreText}`;
+}
+
+// STYLES con evidenziazione stock
+function styles(isEmail = false) {
+  return `
+  <style>
+    body{font-family:Inter,Arial,sans-serif;color:#111;margin:${isEmail?0:20}px;background:#fafafa}
+    .container{max-width:${isEmail?600:1400}px;margin:0 auto;background:white;padding:${isEmail?16:24}px;border-radius:${isEmail?0:12}px;${isEmail?'':'box-shadow:0 4px 6px -1px rgba(0,0,0,0.1)'}}
+    table{border-collapse:collapse;width:100%;margin:16px 0;border-radius:8px;overflow:hidden;${isEmail?'':'box-shadow:0 1px 3px rgba(0,0,0,0.1)'}}
+    th,td{border:1px solid #e5e7eb;padding:${isEmail?8:10}px ${isEmail?10:12}px;font-size:${isEmail?12:13}px;vertical-align:top}
+    th{background:#f8fafc;font-weight:600;color:#374151}
+    h1{margin:0;color:#1f2937;font-size:${isEmail?20:24}px}
+    h2{margin:8px 0;color:#4b5563;font-size:${isEmail?16:20}px}
+    h3{margin:24px 0 12px;color:#374151;font-size:${isEmail?16:18}px;font-weight:600}
+    h4{margin:0 0 8px;color:#374151;font-size:${isEmail?13:14}px;font-weight:600}
+    .muted{color:#6B7280;font-size:${isEmail?11:12}px}
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(${isEmail?120:200}px,1fr));gap:${isEmail?12:16}px;margin:20px 0}
+    .stat-card{background:#f8fafc;padding:${isEmail?12:16}px;border-radius:8px;border:1px solid #e5e7eb;text-align:center}
+    .stat-number{font-size:${isEmail?18:24}px;font-weight:700;color:#1f2937;margin:4px 0}
+    .stat-label{color:#6b7280;font-size:${isEmail?10:12}px;text-transform:uppercase;letter-spacing:0.5px}
+    
+    .row-zero{background-color:#fef2f2 !important} 
+    .row-zero td{border-color:#fecaca !important}
+    .row-one{background-color:#fff7ed !important}  
+    .row-one td{border-color:#fed7aa !important}
+    .row-critical{background-color:#fdf2f8 !important}
+    .row-critical td{border-color:#f9a8d4 !important}
+    
+    .pill{display:inline-block;padding:${isEmail?3:4}px 8px;border-radius:12px;color:#fff;font-weight:600;font-size:${isEmail?10:11}px;text-align:center;min-width:24px}
+    .pill-zero{background:#dc2626}
+    .pill-one{background:#f97316}
+    .pill-critical{background:#ec4899}
+    .pill-high{background:#eab308}
+    .pill-medium{background:#059669}
+    
+    ${isEmail ? '' : `
+    @media (max-width: 768px) {
+      body{margin:10px}.container{padding:16px}
+      table{font-size:11px}th,td{padding:6px 8px}
+      .stats-grid{grid-template-columns:repeat(2,1fr);gap:12px}
+    }
+    `}
+  </style>`;
 }
 
 // MAIN HANDLER
@@ -417,7 +687,7 @@ export default async function handler(req, res) {
     const cacheKey = getCacheKey(period, today, start, end);
     const cacheTTL = getCacheTTL(period, today);
     
-    // CHECK CACHE (bypass con debug=1)
+    // CHECK CACHE
     if (!debug) {
       const cached = getFromCache(cacheKey, cacheTTL);
       if (cached) {
@@ -425,7 +695,7 @@ export default async function handler(req, res) {
           res.setHeader("X-Cache", "HIT");
           return res.status(200).json(cached);
         } else {
-          const html = buildHTML({...cached, today}, email || preview);
+          const html = buildCompleteHTML({...cached, today}, email || preview);
           res.setHeader("Content-Type", "text/html");
           res.setHeader("X-Cache", "HIT");
           return res.status(200).send(html);
@@ -433,17 +703,62 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log(`🚀 Processing ${period} (cache TTL: ${Math.floor(cacheTTL/1000/60)}min)`);
+    console.log(`🚀 Processing ${period} - TTL: ${Math.floor(cacheTTL/1000/60)}min`);
 
     // FETCH DATA
     const t1 = Date.now();
     const orders = await fetchOrdersPaidInRange(start, end);
     timing.orders = Date.now() - t1;
 
-    const { rows } = processProducts(orders);
+    const { rows, variantIds } = await processProductsComplete(orders);
     const conversions = calculateConversions(orders);
     
-    // Comparison con periodo precedente (solo se non monthly)
+    // Dead Stock
+    const deadStockData = await detectDeadStock(variantIds, now);
+    
+    // ROP Analysis
+    const start30 = now.minus({days:30}).startOf("day");
+    const orders30 = await fetchOrdersPaidInRange(start30, now.endOf("day"));
+    
+    const sales30 = new Map();
+    for (const o of orders30) {
+      for (const li of o.line_items||[]) {
+        const k = li.variant_id || `SKU:${li.sku||li.title}`;
+        sales30.set(k, (sales30.get(k)||0) + Number(li.quantity||0));
+      }
+    }
+    
+    const ropRows = rows.map(r=>{
+      const sales30d = sales30.get(r.variantId ?? `SKU:${r.sku||r.productTitle}`) || 0;
+      const rop = computeROP({ 
+        sales30d, 
+        onHand: Number(r.inventoryAvailable||0), 
+        leadDays: 7, 
+        safetyDays: 3
+      });
+      
+      return { 
+        ...r, 
+        onHand: Number(r.inventoryAvailable||0), 
+        sales30d,
+        dailyVel: rop.dailyVel,
+        rop: rop.rop, 
+        target: rop.target, 
+        qty: rop.qty, 
+        coverage: rop.coverage,
+        urgency: rop.urgency
+      };
+    })
+    .filter(r => r.qty > 0 || r.onHand <= 1)
+    .sort((a,b) => {
+      const urgencyOrder = {critical: 0, high: 1, medium: 2};
+      return (urgencyOrder[a.urgency] || 3) - (urgencyOrder[b.urgency] || 3) || b.sales30d - a.sales30d;
+    });
+
+    // ABC Analysis
+    const abcData = computeABCAnalysis(rows);
+    
+    // Comparison
     let comparison = null;
     if (period !== 'monthly') {
       try {
@@ -464,14 +779,13 @@ export default async function handler(req, res) {
 
     timing.total = Date.now() - startTime;
 
-    // Prepare data
     const label = period==="daily" ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}` :
                   period==="weekly" ? `Semana ${start.toFormat("dd LLL")} – ${end.toFormat("dd LLL yyyy")}` :
                   `${start.toFormat("LLLL yyyy")}`;
 
     const reportData = {
       success: true,
-      label, tz, now, rows, orders, conversions, comparison, timing,
+      label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData,
       stats: {
         totalProducts: rows.length,
         totalRevenue: rows.reduce((s,r)=>s+r.revenue,0),
@@ -479,16 +793,14 @@ export default async function handler(req, res) {
       }
     };
 
-    // SAVE TO CACHE
     if (!debug) {
       setCache(cacheKey, reportData, cacheTTL);
     }
 
-    // RETURN RESPONSE
     if (email && !preview) {
       const emailTemplate = {
         subject: `📊 Reporte ventas ${period} - ${label} - ${orders.length} órdenes, ${money(reportData.stats.totalRevenue)}`,
-        html: buildHTML(reportData, true),
+        html: buildCompleteHTML(reportData, true),
         text: `Reporte ventas ${period} - ${label}\nVer online: ${process.env.VERCEL_URL}/api/sales-report?period=${period}`
       };
       
@@ -501,7 +813,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const html = buildHTML(reportData, preview);
+    const html = buildCompleteHTML(reportData, preview);
     res.setHeader("Content-Type", "text/html");
     res.setHeader("X-Cache", "MISS");
     res.setHeader("X-Timing", `${timing.total}ms`);
@@ -511,4 +823,90 @@ export default async function handler(req, res) {
     console.error("❌ Report error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
+}
+
+function buildCompleteHTML(data, isEmail = false) {
+  const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData } = data;
+  const totQty = rows.reduce((s,r)=>s+r.soldQty,0);
+  const totRev = rows.reduce((s,r)=>s+r.revenue,0);
+
+  const isEmailMode = isEmail;
+  const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reporte de Ventas - ${label}</title>
+  ${styles(isEmailMode)}
+</head>
+<body>
+  <div class="container">
+    <header style="text-align:center;${headerStyle}">
+      <h1 style="margin:0;${isEmailMode?'color:white;':''}">📈 Reporte de Ventas</h1>
+      <h2 style="margin:8px 0;${isEmailMode?'color:#dbeafe;':'color:#4b5563;'}">${esc(label)}</h2>
+      <div class="muted" style="${isEmailMode?'color:#bfdbfe;':''}">
+        Generado: ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
+        ${comparison ? ` • vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? '↗️' : '↘️'} ${Math.abs(comparison.revPercent)}%</strong>` : ''}
+      </div>
+    </header>
+
+    <!-- STATS SUMMARY -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">📦</div>
+        <div class="stat-number">${rows.length}</div>
+        <div class="stat-label">Productos únicos</div>
+      </div>
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">🛍️</div>
+        <div class="stat-number">${orders.length}</div>
+        <div class="stat-label">Órdenes procesadas</div>
+      </div>
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">🔴</div>
+        <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)===0).length}</div>
+        <div class="stat-label">Sin inventario</div>
+      </div>
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">🟠</div>
+        <div class="stat-number" style="color:#f97316;">${rows.filter(r=>Number(r.inventoryAvailable||0)===1).length}</div>
+        <div class="stat-label">Inventario bajo</div>
+      </div>
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">💰</div>
+        <div class="stat-number">${money(totRev/orders.length || 0)}</div>
+        <div class="stat-label">Valor promedio orden</div>
+      </div>
+    </div>
+
+    ${renderConversionAnalysis(conversions, isEmailMode)}
+    ${chartsHTML(orders, isEmailMode)}
+    ${!isEmailMode ? renderABCSummary(abcData) : ''}
+    ${renderDeadStockAlert(deadStockData, isEmailMode)}
+    ${renderProductsTable(rows, isEmailMode)}
+    ${renderROPTable(ropRows, isEmailMode)}
+
+    <footer style="margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
+      <div class="muted">
+        <div style="margin-bottom:8px;">
+          <strong>🔗 Navigation:</strong>
+          <a href="?period=daily&today=1" style="color:#2563eb;">Hoy</a> |
+          <a href="?period=daily" style="color:#2563eb;">Ayer</a> |
+          <a href="?period=weekly" style="color:#2563eb;">Semana</a> |
+          <a href="?period=monthly" style="color:#2563eb;">Mes</a>
+        </div>
+        ${!isEmailMode ? `
+        <div>
+          Performance: ${timing?.total || 0}ms |
+          <a href="?preview=1" style="color:#10b981;">Preview Email</a> |
+          <a href="?debug=1" style="color:#8b5cf6;">Debug</a>
+        </div>
+        ` : ''}
+      </div>
+    </footer>
+  </div>
+</body>
+</html>`;
 }
