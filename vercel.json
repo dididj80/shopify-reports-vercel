@@ -6,8 +6,14 @@
     }
   ],
   "functions": {
-    "api/sales-report.js": { "maxDuration": 60 },
-    "api/send-sales-email.js": { "maxDuration": 30 },
-    "api/cron/smart-report.js": { "maxDuration": 45 }
+    "api/sales-report.js": {
+      "maxDuration": 60
+    },
+    "api/send-sales-email.js": {
+      "maxDuration": 30
+    },
+    "api/cron/smart-report.js": {
+      "maxDuration": 45
+    }
   }
 }
