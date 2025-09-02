@@ -1,20 +1,20 @@
 // /api/sales-report.js
 import { DateTime } from "luxon";
 
-// ==== ENV ====
 const SHOP  = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 
-// ==== HELPERS ====
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const money = (n) => new Intl.NumberFormat("es-MX",{style:"currency",currency:"MXN"}).format(Number(n||0));
 
-async function shopFetchJson(url) {
+async function fetchWithHeaders(url) {
   const r = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
-  if (!r.ok) throw new Error(`${url} -> ${r.status} ${await r.text()}`.slice(0,500));
-  return r.json();
+  const text = await r.text();
+  if (!r.ok) throw new Error(`${url} -> ${r.status} ${text}`.slice(0, 500));
+  return { json: text ? JSON.parse(text) : {}, link: r.headers.get("link") || "" };
 }
+async function shopFetchJson(url) { const { json } = await fetchWithHeaders(url); return json; }
 
 async function getShopTZ() {
   const { shop } = await shopFetchJson(REST("/shop.json"));
@@ -36,17 +36,40 @@ async function computeRange(period, todayFlag) {
   return { tz, now, start, end };
 }
 
-// ==== DATA ====
-async function fetchOrdersInRange(start, end) {
-  const url = REST(`/orders.json?status=any&limit=250&created_at_min=${encodeURIComponent(start.toUTC().toISO())}&created_at_max=${encodeURIComponent(end.toUTC().toISO())}`);
-  const { orders } = await shopFetchJson(url);
-  return orders || [];
+// ------- Orders (paid + pagination) -------
+async function fetchOrdersPaidInRange(start, end) {
+  const base =
+    `/orders.json?status=any&financial_status=paid&limit=250` +
+    `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
+    `&created_at_max=${encodeURIComponent(end.toUTC().toISO())}`;
+
+  let url = REST(base);
+  const out = [];
+  for (;;) {
+    const { json, link } = await fetchWithHeaders(url);
+    out.push(...(json.orders || []));
+    const next = parseNext(link);
+    if (!next) break;
+    url = REST(`/orders.json?${next}`);
+  }
+  return out;
+
+  function parseNext(linkHeader) {
+    // Link: <...page_info=XYZ>; rel="next"
+    if (!linkHeader) return null;
+    const m = linkHeader.split(",").map(s=>s.trim()).find(s=>/rel="next"/.test(s));
+    if (!m) return null;
+    const u = m.match(/<([^>]+)>/);
+    if (!u) return null;
+    const qs = new URL(u[1]).search; // includes '?'
+    // Shopify vuole solo i parametri dopo '?'
+    return qs.replace(/^\?/, "");
+  }
 }
 
-/** batch array in blocchi di N */
+// ------- Variants & Inventory -------
 const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>arr.slice(i*n,(i+1)*n));
 
-/** carica dati variants per id -> inventory_item_id, inventory_quantity, inventory_management */
 async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
@@ -55,8 +78,8 @@ async function fetchVariantsByIds(variantIds) {
     for (const v of variants || []) {
       out.set(String(v.id), {
         inventory_item_id: v.inventory_item_id,
-        inventory_quantity: v.inventory_quantity,              // fallback
-        inventory_management: v.inventory_management || "",     // "shopify" se tracciato
+        inventory_quantity: v.inventory_quantity,
+        inventory_management: v.inventory_management || "",
         sku: v.sku || "",
       });
     }
@@ -64,7 +87,6 @@ async function fetchVariantsByIds(variantIds) {
   return out;
 }
 
-/** carica livelli inventariali per inventory_item_id (somma tra location) */
 async function fetchInventoryLevelsForItems(itemIds) {
   const ids = [...new Set(itemIds.filter(Boolean).map(String))];
   const res = Object.create(null);
@@ -78,7 +100,7 @@ async function fetchInventoryLevelsForItems(itemIds) {
   return res;
 }
 
-// ==== CHARTS (SVG donut) ====
+// ------- Donut charts -------
 const PALETTE = ["#2563EB","#10B981","#F59E0B","#EF4444","#8B5CF6","#06B6D4","#84CC16","#F43F5E"];
 function donutSVG(parts, size=120) {
   const total = parts.reduce((s,p)=>s+p.value,0) || 1;
@@ -96,45 +118,136 @@ function donutSVG(parts, size=120) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
 }
 
-function renderCharts(orders) {
-  // per canale
-  const byChannel = {};
-  const byPayment = {};
+function humanLabel(k) {
+  const m = { pos: "POS", web: "Online", online: "Online", shopify: "Online" };
+  return m[k] || k;
+}
+function classPaymentGroup(gws) {
+  const set = new Set((gws||[]).map(s=>s.toLowerCase()));
+  const hasCash   = [...set].some(s=>s.includes("cash") || s.includes("efectivo"));
+  const hasFiserv = [...set].some(s=>s.includes("fiserv") || s.includes("pos"));
+  if (hasCash && hasFiserv) return "Mixto cash+POS";
+  if (hasCash) return "Cash";
+  if (hasFiserv) return "Card POS";
+  return "Online";
+}
+
+function chartsHTML(orders) {
+  const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
+
+  // 1) per canale (source_name)
+  const chObj = {};
   for (const o of orders) {
     const ch = (o.source_name || o.channel || "desconocido").toLowerCase();
-    byChannel[ch] = (byChannel[ch]||0) + o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
-    for (const t of (o.payment_gateway_names||[])) {
-      const k = t.toLowerCase();
-      byPayment[k] = (byPayment[k]||0) + o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
+    chObj[ch] = (chObj[ch]||0) + pieces(o);
+  }
+
+  // 2) per gateway
+  const payObj = {};
+  for (const o of orders) {
+    for (const g of (o.payment_gateway_names||[])) {
+      const k = g.toLowerCase();
+      payObj[k] = (payObj[k]||0) + pieces(o);
     }
   }
-  const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
-  const chParts = top(byChannel);
-  const payParts= top(byPayment);
+
+  // 3) POS vs Online
+  const posVsOnline = { POS:0, Online:0 };
+  for (const o of orders) {
+    const isPOS = (o.source_name || "").toLowerCase()==="pos" || !!o.location_id;
+    posVsOnline[ isPOS ? "POS" : "Online" ] += pieces(o);
+  }
+
+  // 4) Gruppi pagamento (Cash / Card POS / Mix / Online)
+  const grpObj = {};
+  for (const o of orders) {
+    const grp = classPaymentGroup(o.payment_gateway_names);
+    grpObj[grp] = (grpObj[grp]||0) + pieces(o);
+  }
+
+  const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:humanLabel(k), value:v}));
+
+  const sections = [
+    { title:"Canales de venta", parts: top(chObj) },
+    { title:"Métodos de pago (gateway)", parts: top(payObj) },
+    { title:"POS vs Online", parts: Object.entries(posVsOnline).map(([k,v])=>({label:k,value:v})) },
+    { title:"Tipo de pago (Cash/Card POS/Mixto/Online)", parts: top(grpObj) },
+  ];
 
   return `
-  <div style="display:flex;gap:24px;align-items:flex-start;margin:8px 0 16px">
-    <div>
-      <div class="muted">Piezas por canal</div>
-      ${donutSVG(chParts)}
-      <div class="muted">${chParts.map((p,i)=>`<div><span style="display:inline-block;width:10px;height:10px;background:${PALETTE[i%PALETTE.length]};margin-right:6px;border-radius:2px"></span>${esc(p.label)}: ${p.value}</div>`).join("")}</div>
-    </div>
-    <div>
-      <div class="muted">Piezas por pago</div>
-      ${donutSVG(payParts)}
-      <div class="muted">${payParts.map((p,i)=>`<div><span style="display:inline-block;width:10px;height:10px;background:${PALETTE[i%PALETTE.length]};margin-right:6px;border-radius:2px"></span>${esc(p.label)}: ${p.value}</div>`).join("")}</div>
-    </div>
+  <div style="display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:24px;margin:8px 0 16px">
+    ${sections.map(sec => `
+      <div>
+        <div class="muted">${esc(sec.title)}</div>
+        ${donutSVG(sec.parts)}
+        <div class="muted" style="margin-top:6px">
+          ${sec.parts.map((p,i)=>`
+            <div><span style="display:inline-block;width:10px;height:10px;background:${PALETTE[i%PALETTE.length]};margin-right:6px;border-radius:2px"></span>${esc(p.label)}: ${p.value}</div>
+          `).join("")}
+        </div>
+      </div>
+    `).join("")}
   </div>`;
 }
 
-// ==== ROP (semplice) ====
+// ------- ROP -------
 function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
-  const vel = Math.max(0, sales30d/30);                 // pezzi/giorno
-  const rop = Math.ceil(vel*(leadDays+safetyDays));     // punto di riordino
-  const target = Math.ceil(vel*(leadDays+safetyDays+14)); // 2 settimane di buffer dopo l'arrivo
+  const vel = Math.max(0, sales30d/30);
+  const rop = Math.ceil(vel*(leadDays+safetyDays));
+  const target = Math.ceil(vel*(leadDays+safetyDays+14));
   const coverage = vel>0 ? (onHand/vel) : Infinity;
   const qty = Math.max(0, target - onHand);
   return { vel, rop, target, qty, coverage };
+}
+
+// ------- Styles & Tables -------
+function styles() {
+  return `
+  <style>
+    body{font-family:Inter,Arial,sans-serif;color:#111}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;vertical-align:top}
+    th{background:#f3f4f6}
+    h2{margin-bottom:6px}
+    .muted{color:#6B7280;font-size:12px}
+    .row-zero{background:#FEF2F2} .row-zero td{border-color:#FECACA}
+    .row-one{background:#FFF7ED}  .row-one td{border-color:#FED7AA}
+    .pill-zero,.pill-one{display:inline-block;padding:2px 8px;border-radius:999px;color:#fff;font-weight:700;font-size:11px}
+    .pill-zero{background:#DC2626}.pill-one{background:#F97316}
+  </style>`;
+}
+
+function renderProductsTable(rows) {
+  const head = `
+  <thead><tr>
+    <th align="left">Producto</th>
+    <th align="left">Variante</th>
+    <th align="left">SKU</th>
+    <th align="right">Precio unitario</th>
+    <th align="right">Vendidas</th>
+    <th align="right">Ingresos</th>
+    <th align="right">Inventario</th>
+    <th align="right">En camino</th>
+  </tr></thead>`;
+  const body = rows.map(r=>{
+    const inv = Number(r.inventoryAvailable ?? 0);
+    const cls = inv===0 ? ' class="row-zero"' : (inv===1 ? ' class="row-one"' : "");
+    const invCell = inv===0 ? '<span class="pill-zero">0</span>'
+               : inv===1 ? '<span class="pill-one">1</span>'
+               : String(inv);
+    return `
+      <tr${cls}>
+        <td>${esc(r.productTitle)}</td>
+        <td>${esc(r.variantTitle)}</td>
+        <td>${esc(r.sku||"")}</td>
+        <td align="right">${r.unitPrice!=null?esc(money(r.unitPrice)):""}</td>
+        <td align="right">${r.soldQty}</td>
+        <td align="right">${esc(money(r.revenue))}</td>
+        <td align="right">${invCell}</td>
+        <td align="right">${r.incoming ?? 0}</td>
+      </tr>`;
+  }).join("");
+  return `<h3>Ventas por producto</h3><table>${head}<tbody>${body}</tbody></table>`;
 }
 
 function renderROPTable(rows) {
@@ -170,85 +283,25 @@ function renderROPTable(rows) {
   return `<h3>Riordini consigliati</h3><div class="muted">Finestra vendite: 30gg • Lead: 7 • Safety: 3</div><table>${head}<tbody>${body}</tbody></table>`;
 }
 
-// ==== STYLES & TABLE (inventario 0/1 evidenziati) ====
-function styles() {
-  return `
-  <style>
-    body{font-family:Inter,Arial,sans-serif;color:#111}
-    table{border-collapse:collapse;width:100%}
-    th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;vertical-align:top}
-    th{background:#f3f4f6}
-    h2{margin-bottom:6px}
-    .muted{color:#6B7280;font-size:12px}
-    .row-zero{background:#FEF2F2} .row-zero td{border-color:#FECACA}
-    .row-one{background:#FFF7ED}  .row-one td{border-color:#FED7AA}
-    .pill-zero,.pill-one{display:inline-block;padding:2px 8px;border-radius:999px;color:#fff;font-weight:700;font-size:11px}
-    .pill-zero{background:#DC2626}.pill-one{background:#F97316}
-  </style>`;
+function renderDebug(rows, tz) {
+  const head = `<thead><tr><th>Producto</th><th>Variante</th><th>Variant ID</th><th>Inventory Item</th><th>Available</th></tr></thead>`;
+  const body = rows.map(r=>`<tr><td>${esc(r.productTitle)}</td><td>${esc(r.variantTitle)}</td><td>${r.variantId||""}</td><td>${r.inventory_item_id||""}</td><td>${r.inventoryAvailable??""}</td></tr>`).join("");
+  return `<h3>DEBUG (solo con ?debug=1)</h3><div class="muted">TZ: ${esc(tz)}</div><table>${head}<tbody>${body}</tbody></table>`;
 }
 
-function renderProductsTable(rows) {
-  const head = `
-  <thead><tr>
-    <th align="left">Producto</th>
-    <th align="left">Variante</th>
-    <th align="left">SKU</th>
-    <th align="right">Precio unitario</th>
-    <th align="right">Vendidas</th>
-    <th align="right">Ingresos</th>
-    <th align="right">Inventario</th>
-    <th align="right">En camino</th>
-  </tr></thead>`;
-
-  const body = rows.map(r=>{
-    const inv = Number(r.inventoryAvailable ?? 0);
-    const cls = inv===0 ? ' class="row-zero"' : (inv===1 ? ' class="row-one"' : "");
-    const invCell = inv===0 ? '<span class="pill-zero">0</span>'
-               : inv===1 ? '<span class="pill-one">1</span>'
-               : String(inv);
-    return `
-      <tr${cls}>
-        <td>${esc(r.productTitle)}</td>
-        <td>${esc(r.variantTitle)}</td>
-        <td>${esc(r.sku||"")}</td>
-        <td align="right">${r.unitPrice!=null?esc(money(r.unitPrice)):""}</td>
-        <td align="right">${r.soldQty}</td>
-        <td align="right">${esc(money(r.revenue))}</td>
-        <td align="right">${invCell}</td>
-        <td align="right">${r.incoming ?? 0}</td>
-      </tr>`;
-  }).join("");
-
-  return `<h3>Ventas por producto</h3><table>${head}<tbody>${body}</tbody></table>`;
-}
-
-// ==== DEBUG ====
-function renderDebug(debugRows, tz) {
-  const head = `
-  <thead><tr>
-    <th>Producto</th><th>Variante</th><th>Variant ID</th><th>Inventory Item</th><th>Available</th>
-  </tr></thead>`;
-  const body = debugRows.map(r=>`
-    <tr><td>${esc(r.productTitle)}</td><td>${esc(r.variantTitle)}</td><td>${r.variantId||""}</td><td>${r.inventory_item_id||""}</td><td>${r.inventoryAvailable??""}</td></tr>
-  `).join("");
-  return `<h3>DEBUG Incoming (solo con ?debug=1)</h3>
-  <div class="muted">TZ: ${esc(tz)}</div>
-  <table>${head}<tbody>${body}</tbody></table>`;
-}
-
-// ==== HANDLER ====
+// ------- Handler -------
 export default async function handler(req, res) {
   try {
-    const period = (req.query.period || "daily").toLowerCase();   // daily|weekly|monthly
+    const period = (req.query.period || "daily").toLowerCase(); // daily|weekly|monthly
     const today  = req.query.today === "1";
     const debug  = req.query.debug === "1";
 
     const { tz, now, start, end } = await computeRange(period, today);
 
-    // 1) ordini periodo
-    const orders = await fetchOrdersInRange(start, end);
+    // 1) ordini pagati nel range (con pagination)
+    const orders = await fetchOrdersPaidInRange(start, end);
 
-    // 2) righe prodotto dal periodo
+    // 2) righe prodotto
     const byVariant = new Map();
     const variantIds = new Set();
     for (const o of orders) {
@@ -270,71 +323,57 @@ export default async function handler(req, res) {
     }
     const rows = Array.from(byVariant.values()).sort((a,b)=>b.soldQty-a.soldQty||b.revenue-a.revenue);
 
-    // 3) recupero i variant → inventory_item_id, e fallback inventory_quantity
+    // 3) variant → inventory_item_id (+ fallback qty)
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     for (const r of rows) {
       const info = r.variantId ? variantInfo.get(String(r.variantId)) : null;
       if (info && !r.inventory_item_id) r.inventory_item_id = info.inventory_item_id || null;
-      r._variantFallbackQty = info ? info.inventory_quantity : null;         // fallback se non tracciato
-      r._variantMgmt = info ? info.inventory_management : "";
+      r._variantFallbackQty = info ? info.inventory_quantity : null;
+      r._variantMgmt        = info ? info.inventory_management : "";
     }
 
-    // 4) livelli inventariali solo per gli item id che abbiamo
+    // 4) inventory levels per item id
     const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
     const invLevels = await fetchInventoryLevelsForItems(itemIds);
-
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
       if (iid && invLevels[iid] != null) {
-        r.inventoryAvailable = invLevels[iid];                 // somma su tutte le location
+        r.inventoryAvailable = invLevels[iid];
       } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
-        r.inventoryAvailable = r._variantFallbackQty;          // prodotto non tracciato -> usa quantity del variant
+        r.inventoryAvailable = r._variantFallbackQty;
       } else {
-        r.inventoryAvailable = 0;                              // nessuna info -> 0
+        r.inventoryAvailable = 0;
       }
     }
 
-    // 5) vendite ultimi 30 giorni per ROP
-    const start30 = now.minus({days: 30}).startOf("day");
-    const orders30 = await fetchOrdersInRange(start30, now.endOf("day"));
-    const sales30 = new Map(); // key: variant_id -> qty 30gg
-    for (const o of orders30) {
-      for (const li of o.line_items || []) {
-        const k = li.variant_id || `SKU:${li.sku||li.title}`;
-        sales30.set(k, (sales30.get(k)||0) + Number(li.quantity||0));
-      }
+    // 5) vendite 30gg per ROP
+    const start30 = now.minus({days:30}).startOf("day");
+    const orders30 = await fetchOrdersPaidInRange(start30, now.endOf("day"));
+    const sales30 = new Map();
+    for (const o of orders30) for (const li of o.line_items||[]) {
+      const k = li.variant_id || `SKU:${li.sku||li.title}`;
+      sales30.set(k, (sales30.get(k)||0) + Number(li.quantity||0));
     }
-
-    // 6) compila righe ROP (solo quelle con vendite o scorta bassa)
-    const ropRows = rows.map(r => {
+    const ropRows = rows.map(r=>{
       const sales30d = sales30.get(r.variantId ?? `SKU:${r.sku||r.productTitle}`) || 0;
       const c = computeROP({ sales30d, onHand: Number(r.inventoryAvailable||0), leadDays:7, safetyDays:3 });
-      return {
-        ...r,
-        onHand: Number(r.inventoryAvailable||0),
-        incoming: r.incoming || 0,
-        sales30d,
-        vel: c.vel, rop: c.rop, target: c.target, qty: c.qty, coverage: c.coverage,
-      };
-    }).filter(r => r.qty > 0 || r.onHand <= 1);
+      return { ...r, onHand:Number(r.inventoryAvailable||0), sales30d,
+        vel:c.vel, rop:c.rop, target:c.target, qty:c.qty, coverage:c.coverage };
+    }).filter(r=> r.qty>0 || r.onHand<=1);
 
-    // Totali
+    // Totali e label
     const totQty = rows.reduce((s,r)=>s+r.soldQty,0);
     const totRev = rows.reduce((s,r)=>s+r.revenue,0);
-
-    // Label
     const label =
-      period==="daily"
-        ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}`
-        : period==="weekly"
-        ? `Semana ${start.toFormat("dd LLL")} – ${end.toFormat("dd LLL yyyy")}`
-        : `Mes ${start.toFormat("LLLL yyyy")}`;
+      period==="daily"  ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}` :
+      period==="weekly" ? `Semana ${start.toFormat("dd LLL")} – ${end.toFormat("dd LLL yyyy")}` :
+                          `Mes ${start.toFormat("LLLL yyyy")}`;
 
     const html = `<!doctype html><html><head><meta charset="utf-8">${styles()}</head><body>
       <h2>Reporte ${period} — ${esc(label)} <span class="muted">(TZ: ${esc(tz)})</span></h2>
       <p><b>Total piezas:</b> ${totQty.toLocaleString("es-MX")} • <b>Ingresos:</b> ${esc(money(totRev))}</p>
 
-      ${renderCharts(orders)}
+      ${chartsHTML(orders)}
 
       ${renderProductsTable(rows)}
       <div style="height:16px"></div>
