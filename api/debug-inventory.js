@@ -330,10 +330,12 @@ export default async function handler(req, res) {
         by_sku: `${baseUrl}/api/debug-inventory?sku=TUO-SKU-123`,
         by_barcode: `${baseUrl}/api/debug-inventory?barcode=123456789`,
         compare_methods: `${baseUrl}/api/debug-inventory?compare_methods=true&sample_size=10`,
-        show_locations: `${baseUrl}/api/debug-inventory?show_locations=true`
+        show_locations: `${baseUrl}/api/debug-inventory?show_locations=true`,
+        list_products: `${baseUrl}/api/debug-inventory?list_products=true&limit=20`
       },
       examples: {
-        "Test prodotto specifico": "?sku=ABC-123",
+        "Test prodotto specifico": "?barcode=7508006184500",
+        "Lista prodotti disponibili": "?list_products=true&limit=10",
         "Confronta metodi inventario": "?compare_methods=true",
         "Vedi tutte le location": "?show_locations=true"
       },
