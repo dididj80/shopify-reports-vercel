@@ -3,11 +3,9 @@
 
 import { DateTime } from "luxon";
 
-// === ENV ===
 const SHOP  = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 
-// === Utils ===
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
 
 function esc(s) {
@@ -16,7 +14,6 @@ function esc(s) {
 const fmtMoney = (n) =>
   new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(Number(n||0));
 
-// === Shopify helpers ===
 async function shopFetchJson(url) {
   const r = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
   if (!r.ok) {
@@ -26,13 +23,11 @@ async function shopFetchJson(url) {
   return r.json();
 }
 
-// Fuso orario reale del negozio
 async function getShopTZ() {
   const { shop } = await shopFetchJson(REST("/shop.json"));
   return shop.iana_timezone || shop.timezone || "UTC";
 }
 
-// Calcolo range [start, end] (end incluso per REST) nel fuso del negozio
 async function computeRange(period, todayFlag) {
   const tz = await getShopTZ();
   const now = DateTime.now().setZone(tz);
@@ -50,43 +45,48 @@ async function computeRange(period, todayFlag) {
     start = now.startOf("week");
     end   = now.endOf("week");
   } else {
-    // monthly
     start = now.startOf("month");
     end   = now.endOf("month");
   }
   return { tz, start, end };
 }
 
-// === Data ===
 async function fetchOrders(period, todayFlag) {
   if (!SHOP || !TOKEN) throw new Error("Missing SHOPIFY_SHOP or SHOPIFY_ADMIN_TOKEN");
-
   const { tz, start, end } = await computeRange(period, todayFlag);
-
   const url = REST(
     `/orders.json?status=any&limit=250` +
-      `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
-      `&created_at_max=${encodeURIComponent(end.toUTC().toISO())}`
+    `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
+    `&created_at_max=${encodeURIComponent(end.toUTC().toISO())}`
   );
-
-  // NB: per semplicità prendo al massimo 250 ordini; se ti serve la paginazione la aggiungiamo.
   const { orders } = await shopFetchJson(url);
   return { tz, start, end, orders: orders || [] };
 }
 
-async function fetchInventoryLevels() {
-  // Ritorna tutti i livelli; ci serve solo available per inventory_item_id
-  const { inventory_levels } = await shopFetchJson(REST(`/inventory_levels.json?limit=250`));
-  const map = Object.create(null);
-  for (const lvl of inventory_levels || []) {
-    const key = String(lvl.inventory_item_id);
-    // sommo tra location diverse
-    map[key] = (map[key] || 0) + Number(lvl.available ?? 0);
+/**
+ * Carica i livelli inventariali per una lista di inventory_item_id.
+ * Shopify consente max ~50 ID per chiamata -> batch.
+ * Ritorna: { [inventory_item_id]: availableTotaleSuTutteLeLocation }
+ */
+async function fetchInventoryForItems(itemIds) {
+  const ids = [...new Set(itemIds.filter(Boolean).map(String))];
+  if (ids.length === 0) return {};
+  const chunkSize = 50;
+  const result = Object.create(null);
+
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const url = REST(`/inventory_levels.json?inventory_item_ids=${encodeURIComponent(chunk.join(","))}`);
+    const { inventory_levels } = await shopFetchJson(url);
+    for (const lvl of inventory_levels || []) {
+      const key = String(lvl.inventory_item_id);
+      result[key] = (result[key] || 0) + Number(lvl.available ?? 0);
+    }
   }
-  return map;
+  return result;
 }
 
-// === HTML ===
+// ---------- RENDER ----------
 function styles() {
   return `
   <style>
@@ -98,14 +98,13 @@ function styles() {
     .muted{color:#6B7280;font-size:12px}
     .spacer{height:16px}
 
-    /* evidenziazioni inventario */
-    .row-zero  { background:#FEF2F2; }  /* rosso chiaro */
+    .row-zero  { background:#FEF2F2; }
     .row-zero td { border-color:#FECACA; }
     .pill-zero {
       display:inline-block;padding:2px 8px;border-radius:999px;
       background:#DC2626;color:#fff;font-weight:700;font-size:11px;
     }
-    .row-one   { background:#FFF7ED; }  /* arancione chiaro */
+    .row-one   { background:#FFF7ED; }
     .row-one td { border-color:#FED7AA; }
     .pill-one  {
       display:inline-block;padding:2px 8px;border-radius:999px;
@@ -149,19 +148,27 @@ function renderTable(rows) {
   return `<h3>Ventas por producto</h3><table>${head}<tbody>${body}</tbody></table>`;
 }
 
-// === Handler ===
+// ---------- HANDLER ----------
 export default async function handler(req, res) {
   try {
     const period = (req.query.period || "daily").toLowerCase(); // daily|weekly|monthly
     const today  = req.query.today === "1";
 
-    // 1) Ordini nel range (fuso negozio)
+    // 1) Ordini nel range
     const { tz, start, end, orders } = await fetchOrders(period, today);
 
-    // 2) Inventario disponibile per inventory_item_id
-    const invMap = await fetchInventoryLevels();
+    // 2) Raccolgo tutti gli inventory_item_id presenti nel report
+    const itemIdSet = new Set();
+    for (const o of orders) {
+      for (const li of o.line_items || []) {
+        if (li.inventory_item_id) itemIdSet.add(li.inventory_item_id);
+      }
+    }
 
-    // 3) Aggregazione righe per variante
+    // 3) Carico i livelli solo per questi ID (niente 422)
+    const invMap = await fetchInventoryForItems([...itemIdSet]);
+
+    // 4) Aggrego righe per variante
     const byVariant = new Map();
     for (const o of orders) {
       for (const li of o.line_items || []) {
@@ -191,7 +198,7 @@ export default async function handler(req, res) {
 
     const label =
       period === "daily"
-        ? `${today ? "Hoy" : "Ayer"} ${ (today ? start : start).toFormat("dd LLL yyyy") }`
+        ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}`
         : period === "weekly"
         ? `Semana ${start.toFormat("dd LLL")} – ${end.toFormat("dd LLL yyyy")}`
         : `Mes ${start.toFormat("LLLL yyyy")}`;
