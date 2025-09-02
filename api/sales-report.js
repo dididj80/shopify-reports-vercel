@@ -1,7 +1,7 @@
-// /api/sales-report.js - Versione COMPLETA con tutte le funzionalità
+// /api/sales-report.js - Versione COMPLETA con tutte le funzionalità ORIGINALI + inventario migliorato
 import { DateTime } from "luxon";
 
-// CACHE ottimizzata
+// CACHE ottimizzata - ORIGINALE
 const reportCache = new Map();
 function getCacheTTL(period, today) {
   if (today) return 3 * 60 * 1000;
@@ -34,7 +34,7 @@ function setCache(key, data, ttl) {
   reportCache.set(key, { data, timestamp: Date.now() });
 }
 
-// SHOPIFY API
+// SHOPIFY API - ORIGINALE
 const SHOP = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
@@ -53,9 +53,8 @@ async function shopFetchJson(url) {
   return json; 
 }
 
-// 1. FIX TIMEZONE - forza Monterrey/Mexico
+// TIMEZONE - ORIGINALE
 async function getShopTZ() {
-  // Forza timezone Monterrey invece di UTC
   return "America/Monterrey";
 }
 
@@ -84,7 +83,7 @@ async function computeRange(period, todayFlag) {
   return { tz, now, start, end };
 }
 
-// FETCH ORDERS con paginazione
+// FETCH ORDERS - ORIGINALE
 async function fetchOrdersPaidInRange(start, end) {
   const base = `/orders.json?status=any&financial_status=paid&limit=250` +
     `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
@@ -114,10 +113,10 @@ async function fetchOrdersPaidInRange(start, end) {
   }
 }
 
-// CHUNK helper
+// CHUNK helper - ORIGINALE
 const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>arr.slice(i*n,(i+1)*n));
 
-// FETCH VARIANTS con inventory
+// FETCH VARIANTS - ORIGINALE
 async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
@@ -142,27 +141,49 @@ async function fetchVariantsByIds(variantIds) {
   return out;
 }
 
-// FETCH INVENTORY LEVELS
-async function fetchInventoryLevelsForItems(itemIds) {
+// 🔄 INVENTORY LEVELS MIGLIORATA - Solo location attive per default
+async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   const ids = [...new Set(itemIds.filter(Boolean).map(String))];
   const res = Object.create(null);
+  const locationCache = new Map();
   
   for (const c of chunk(ids, 50)) {
     try {
       const { inventory_levels } = await shopFetchJson(REST(`/inventory_levels.json?inventory_item_ids=${encodeURIComponent(c.join(","))}`));
       for (const lvl of inventory_levels || []) {
         const key = String(lvl.inventory_item_id);
-        res[key] = (res[key] || 0) + Number(lvl.available ?? 0);
+        const available = Number(lvl.available || 0);
+        
+        // 🔄 VERIFICA SE LOCATION È ATTIVA (se richiesto)
+        if (!includeInactive) {
+          let location = locationCache.get(lvl.location_id);
+          if (!location) {
+            try {
+              const locationData = await shopFetchJson(REST(`/locations/${lvl.location_id}.json`));
+              location = locationData.location;
+              locationCache.set(lvl.location_id, location);
+            } catch (err) {
+              console.error(`Error fetching location ${lvl.location_id}:`, err.message);
+              continue;
+            }
+          }
+          
+          // Solo location attive
+          if (!location.active) continue;
+        }
+        
+        res[key] = (res[key] || 0) + available;
       }
     } catch (err) {
       console.error(`Error fetch inventory:`, err.message);
     }
   }
+  
   return res;
 }
 
-// ELABORAZIONE PRODOTTI COMPLETA
-async function processProductsComplete(orders) {
+// ELABORAZIONE PRODOTTI - ORIGINALE (con inventory migliorato)
+async function processProductsComplete(orders, includeInactiveLocations = false) {
   const byVariant = new Map();
   const variantIds = new Set();
   
@@ -206,10 +227,10 @@ async function processProductsComplete(orders) {
     }
   }
 
-  // FETCH INVENTORY LEVELS
+  // 🔄 FETCH INVENTORY LEVELS con opzione location
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
-    const invLevels = await fetchInventoryLevelsForItems(itemIds);
+    const invLevels = await fetchInventoryLevelsForItems(itemIds, includeInactiveLocations);
     
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
@@ -226,7 +247,7 @@ async function processProductsComplete(orders) {
   return { rows, variantIds: [...variantIds] };
 }
 
-// CONVERSIONI per canale
+// CONVERSIONI - ORIGINALE
 function calculateConversions(orders) {
   const channelStats = {};
   
@@ -256,7 +277,7 @@ function calculateConversions(orders) {
   }).sort((a,b) => b.orders - a.orders);
 }
 
-// DEAD STOCK DETECTION
+// DEAD STOCK DETECTION - ORIGINALE
 async function detectDeadStock(variantIds, now) {
   try {
     const deadStockDays = 60;
@@ -276,7 +297,7 @@ async function detectDeadStock(variantIds, now) {
     
     const deadVariantInfo = await fetchVariantsByIds(deadVariantIds);
     const deadItemIds = Array.from(deadVariantInfo.values()).map(v => v.inventory_item_id).filter(Boolean);
-    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds);
+    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds); // Solo location attive
     
     return deadVariantIds.map(vid => {
       const info = deadVariantInfo.get(String(vid));
@@ -302,7 +323,7 @@ async function detectDeadStock(variantIds, now) {
   }
 }
 
-// ROP CALCULATION
+// ROP CALCULATION - ORIGINALE
 function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
   const dailyVel = Math.max(0, sales30d/30);
   const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
@@ -322,7 +343,7 @@ function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
   };
 }
 
-// ABC ANALYSIS
+// ABC ANALYSIS - ORIGINALE
 function computeABCAnalysis(rows) {
   const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
   let cumulativeRevenue = 0;
@@ -345,16 +366,14 @@ function computeABCAnalysis(rows) {
   });
 }
 
-// 4 GRAFICI COMPLETI
+// GRAFICI COMPLETI - ORIGINALI
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
-// 3. FIX GRAFICI - gestisce dati singoli
 function donutSVG(parts, size=140) {
   if (!parts.length || parts.every(p => p.value === 0)) {
     return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:50%;color:#9ca3af;font-size:12px;">Sin datos</div>`;
   }
 
-  // Se c'è UN SOLO dato, fai cerchio completo
   if (parts.length === 1) {
     return `
     <div style="width:${size}px;height:${size}px;border-radius:50%;background:${PALETTE[0]};display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:14px;margin:0 auto;">
@@ -382,7 +401,6 @@ function donutSVG(parts, size=140) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
 }
 
-// 4. FIX HORARIOS - usa timezone corretto
 function chartsHTML(orders, isEmail = false) {
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
@@ -404,10 +422,9 @@ function chartsHTML(orders, isEmail = false) {
     grpObj[type] = (grpObj[type]||0) + pieces(o);
   }
 
-  // 3) Franjas horarias - FIX TIMEZONE
+  // 3) Franjas horarias
   const hourObj = {};
   for (const o of orders) {
-    // Converti a timezone Monterrey
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
     const hour = orderDate.hour;
     
@@ -465,7 +482,7 @@ function chartsHTML(orders, isEmail = false) {
   </div>`;
 }
 
-// RENDER FUNCTIONS
+// RENDER FUNCTIONS - ORIGINALI
 function renderConversionAnalysis(conversionData, isEmail = false) {
   if (!conversionData.length) return '';
   
@@ -510,7 +527,6 @@ function renderDeadStockAlert(deadStockData, isEmail = false) {
   </div>`;
 }
 
-// 6. FIX ABC ANALYSIS - mostra prodotti top
 function renderABCSummary(abcData) {
   const categories = {
     A: abcData.filter(r => r.abcCategory === 'A'),
@@ -544,7 +560,6 @@ function renderABCSummary(abcData) {
       </div>
     </div>
     
-    <!-- DETTAGLI PRODOTTI CATEGORIA A -->
     <div style="background:white;border-radius:6px;padding:12px;">
       <strong style="color:#dc2626;">🏆 TOP PERFORMERS (Categoria A):</strong>
       <div style="margin-top:8px;font-size:11px;line-height:1.4;">
@@ -557,7 +572,6 @@ function renderABCSummary(abcData) {
   </div>`;
 }
 
-// 2. FIX STOCK DISPLAY - mostra numeri invece di quadratini
 function renderProductsTable(rows, isEmail = false) {
   const maxRows = isEmail ? 15 : 50;
   const displayRows = rows.slice(0, maxRows);
@@ -578,7 +592,6 @@ function renderProductsTable(rows, isEmail = false) {
     const rank = idx + 1;
     let cls = "";
     
-    // MOSTRA NUMERO invece di quadratino colorato
     let invCell = String(inv);
     if (inv === 0) {
       cls = ' class="row-zero"';
@@ -607,19 +620,17 @@ function renderProductsTable(rows, isEmail = false) {
   return `<h3>📊 Top productos vendidos</h3><table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
-// 5. FIX ORDINAMENTO ROP - critico prima
 function renderROPTable(rows, isEmail = false) {
   if (!rows.length) {
     return `<div style="margin:16px 0;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;text-align:center;"><strong style="color:#166534;">✅ Excelente!</strong> Todos los productos tienen stock suficiente.</div>`;
   }
   
-  // RIORDINA: critical -> high -> medium
   const sortedRows = [...rows].sort((a,b) => {
     const urgencyOrder = {critical: 0, high: 1, medium: 2};
     const aOrder = urgencyOrder[a.urgency] ?? 3;
     const bOrder = urgencyOrder[b.urgency] ?? 3;
     if (aOrder !== bOrder) return aOrder - bOrder;
-    return b.sales30d - a.sales30d; // Poi per vendite
+    return b.sales30d - a.sales30d;
   });
   
   const maxRows = isEmail ? 10 : 25;
@@ -664,7 +675,6 @@ function renderROPTable(rows, isEmail = false) {
     <table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
-// STYLES con evidenziazione stock
 function styles(isEmail = false) {
   return `
   <style>
@@ -707,7 +717,7 @@ function styles(isEmail = false) {
   </style>`;
 }
 
-// MAIN HANDLER
+// MAIN HANDLER - con opzione per inventory globale
 export default async function handler(req, res) {
   const startTime = Date.now();
   const timing = {};
@@ -718,9 +728,12 @@ export default async function handler(req, res) {
     const email = req.query.email === "1";
     const preview = req.query.preview === "1";
     const debug = req.query.debug === "1";
+    
+    // 🆕 OPZIONE per includere location inattive (per il tuo piano futuro)
+    const includeAllLocations = req.query.include_all_locations === "1";
 
     const { tz, now, start, end } = await computeRange(period, today);
-    const cacheKey = getCacheKey(period, today, start, end);
+    const cacheKey = getCacheKey(period, today, start, end) + (includeAllLocations ? '-all' : '');
     const cacheTTL = getCacheTTL(period, today);
     
     // CHECK CACHE
@@ -731,7 +744,7 @@ export default async function handler(req, res) {
           res.setHeader("X-Cache", "HIT");
           return res.status(200).json(cached);
         } else {
-          const html = buildCompleteHTML({...cached, today}, email || preview);
+          const html = buildCompleteHTML({...cached, includeAllLocations}, email || preview);
           res.setHeader("Content-Type", "text/html");
           res.setHeader("X-Cache", "HIT");
           return res.status(200).send(html);
@@ -739,14 +752,15 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log(`🚀 Processing ${period} - TTL: ${Math.floor(cacheTTL/1000/60)}min`);
+    console.log(`🚀 Processing ${period} - TTL: ${Math.floor(cacheTTL/1000/60)}min${includeAllLocations ? ' - INCLUDING ALL LOCATIONS' : ''}`);
 
     // FETCH DATA
     const t1 = Date.now();
     const orders = await fetchOrdersPaidInRange(start, end);
     timing.orders = Date.now() - t1;
 
-    const { rows, variantIds } = await processProductsComplete(orders);
+    // 🔄 PROCESSAMENTO con opzione location
+    const { rows, variantIds } = await processProductsComplete(orders, includeAllLocations);
     const conversions = calculateConversions(orders);
     
     // Dead Stock
@@ -816,12 +830,13 @@ export default async function handler(req, res) {
     timing.total = Date.now() - startTime;
 
     const label = period==="daily" ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}` :
-                  period==="weekly" ? `Semana ${start.toFormat("dd LLL")} – ${end.toFormat("dd LLL yyyy")}` :
+                  period==="weekly" ? `Semana ${start.toFormat("dd LLL")} — ${end.toFormat("dd LLL yyyy")}` :
                   `${start.toFormat("LLLL yyyy")}`;
 
     const reportData = {
       success: true,
       label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData,
+      includeAllLocations, // 🆕 Flag per sapere che modalità è usata
       stats: {
         totalProducts: rows.length,
         totalRevenue: rows.reduce((s,r)=>s+r.revenue,0),
@@ -856,19 +871,21 @@ export default async function handler(req, res) {
     res.status(200).send(html);
     
   } catch (err) {
-    console.error("❌ Report error:", err);
+    console.error("⛔ Report error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
-// 7. FIX STATS - aggiungi totale vendite
 function buildCompleteHTML(data, isEmail = false) {
-  const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData } = data;
+  const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, includeAllLocations } = data;
   const totQty = rows.reduce((s,r)=>s+r.soldQty,0);
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
 
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
+  
+  // 🆕 Indica se è modalità globale
+  const inventoryNote = includeAllLocations ? ' (📍 Inventario GLOBAL - todas las locations)' : ' (📍 Solo locations activas)';
 
   return `<!doctype html>
 <html lang="es">
@@ -882,14 +899,13 @@ function buildCompleteHTML(data, isEmail = false) {
   <div class="container">
     <header style="text-align:center;${headerStyle}">
       <h1 style="margin:0;${isEmailMode?'color:white;':''}">📈 Reporte de Ventas</h1>
-      <h2 style="margin:8px 0;${isEmailMode?'color:#dbeafe;':'color:#4b5563;'}">${esc(label)}</h2>
+      <h2 style="margin:8px 0;${isEmailMode?'color:#dbeafe;':'color:#4b5563;'}">${esc(label)}${inventoryNote}</h2>
       <div class="muted" style="${isEmailMode?'color:#bfdbfe;':''}">
         Generado: ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
         ${comparison ? ` • vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? '↗️' : '↘️'} ${Math.abs(comparison.revPercent)}%</strong>` : ''}
       </div>
     </header>
 
-    <!-- STATS SUMMARY CON TOTALE VENDITE -->
     <div class="stats-grid">
       <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">📦</div>
@@ -928,13 +944,18 @@ function buildCompleteHTML(data, isEmail = false) {
     <footer style="margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
       <div class="muted">
         <div style="margin-bottom:8px;">
-          <strong>🔗 Navigation:</strong>
+          <strong>📗 Navigation:</strong>
           <a href="?period=daily&today=1" style="color:#2563eb;">Hoy</a> |
           <a href="?period=daily" style="color:#2563eb;">Ayer</a> |
           <a href="?period=weekly" style="color:#2563eb;">Semana</a> |
           <a href="?period=monthly" style="color:#2563eb;">Mes</a>
         </div>
         ${!isEmailMode ? `
+        <div style="margin-bottom:8px;">
+          <strong>📍 Inventario:</strong>
+          <a href="?period=${req?.query?.period || 'daily'}&include_all_locations=0" style="color:#059669;">Solo Activas</a> |
+          <a href="?period=${req?.query?.period || 'daily'}&include_all_locations=1" style="color:#dc2626;">Todas las Locations</a>
+        </div>
         <div>
           Performance: ${timing?.total || 0}ms |
           <a href="?preview=1" style="color:#10b981;">Preview Email</a> |
@@ -946,4 +967,3 @@ function buildCompleteHTML(data, isEmail = false) {
   </div>
 </body>
 </html>`;
-}
