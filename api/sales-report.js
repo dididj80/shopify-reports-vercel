@@ -53,9 +53,10 @@ async function shopFetchJson(url) {
   return json; 
 }
 
+// 1. FIX TIMEZONE - forza Monterrey/Mexico
 async function getShopTZ() {
-  const { shop } = await shopFetchJson(REST("/shop.json"));
-  return shop.iana_timezone || shop.timezone || "UTC";
+  // Forza timezone Monterrey invece di UTC
+  return "America/Monterrey";
 }
 
 async function computeRange(period, todayFlag) {
@@ -347,9 +348,18 @@ function computeABCAnalysis(rows) {
 // 4 GRAFICI COMPLETI
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
+// 3. FIX GRAFICI - gestisce dati singoli
 function donutSVG(parts, size=140) {
   if (!parts.length || parts.every(p => p.value === 0)) {
-    return `<svg width="${size}" height="${size}"><circle cx="${size/2}" cy="${size/2}" r="${size/2-10}" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="2"/><text x="${size/2}" y="${size/2}" text-anchor="middle" dominant-baseline="central" fill="#9ca3af" font-size="12">Sin datos</text></svg>`;
+    return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:50%;color:#9ca3af;font-size:12px;">Sin datos</div>`;
+  }
+
+  // Se c'è UN SOLO dato, fai cerchio completo
+  if (parts.length === 1) {
+    return `
+    <div style="width:${size}px;height:${size}px;border-radius:50%;background:${PALETTE[0]};display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:14px;margin:0 auto;">
+      ${parts[0].value.toLocaleString("es-MX")}
+    </div>`;
   }
 
   const total = parts.reduce((s,p)=>s+p.value,0) || 1;
@@ -372,6 +382,7 @@ function donutSVG(parts, size=140) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
 }
 
+// 4. FIX HORARIOS - usa timezone corretto
 function chartsHTML(orders, isEmail = false) {
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
@@ -393,10 +404,13 @@ function chartsHTML(orders, isEmail = false) {
     grpObj[type] = (grpObj[type]||0) + pieces(o);
   }
 
-  // 3) Franjas horarias
+  // 3) Franjas horarias - FIX TIMEZONE
   const hourObj = {};
   for (const o of orders) {
-    const hour = new Date(o.created_at).getHours();
+    // Converti a timezone Monterrey
+    const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
+    const hour = orderDate.hour;
+    
     const timeSlot = 
       hour < 6 ? "Madrugada (00-06)" :
       hour < 12 ? "Mañana (06-12)" :
@@ -496,6 +510,7 @@ function renderDeadStockAlert(deadStockData, isEmail = false) {
   </div>`;
 }
 
+// 6. FIX ABC ANALYSIS - mostra prodotti top
 function renderABCSummary(abcData) {
   const categories = {
     A: abcData.filter(r => r.abcCategory === 'A'),
@@ -508,7 +523,7 @@ function renderABCSummary(abcData) {
   return `
   <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
     <h4 style="margin:0 0 12px;color:#0369a1;">📊 Análisis ABC (Regla 80/20)</h4>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px;">
       <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
         <div style="font-size:20px;font-weight:700;color:#dc2626;">A</div>
         <div style="font-size:12px;color:#6b7280;">TOP PERFORMERS</div>
@@ -528,9 +543,21 @@ function renderABCSummary(abcData) {
         <div><strong>${((categories.C.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
       </div>
     </div>
+    
+    <!-- DETTAGLI PRODOTTI CATEGORIA A -->
+    <div style="background:white;border-radius:6px;padding:12px;">
+      <strong style="color:#dc2626;">🏆 TOP PERFORMERS (Categoria A):</strong>
+      <div style="margin-top:8px;font-size:11px;line-height:1.4;">
+        ${categories.A.slice(0,8).map((p, i) => `
+          <div style="margin:2px 0;"><strong>${i+1}.</strong> ${esc(p.productTitle)} - ${money(p.revenue)} (${p.revenuePercent}%)</div>
+        `).join('')}
+        ${categories.A.length > 8 ? `<div style="color:#6b7280;margin-top:4px;">... y ${categories.A.length - 8} productos más</div>` : ''}
+      </div>
+    </div>
   </div>`;
 }
 
+// 2. FIX STOCK DISPLAY - mostra numeri invece di quadratini
 function renderProductsTable(rows, isEmail = false) {
   const maxRows = isEmail ? 15 : 50;
   const displayRows = rows.slice(0, maxRows);
@@ -550,19 +577,18 @@ function renderProductsTable(rows, isEmail = false) {
     const inv = Number(r.inventoryAvailable ?? 0);
     const rank = idx + 1;
     let cls = "";
-    let invCell = String(inv);
     
+    // MOSTRA NUMERO invece di quadratino colorato
+    let invCell = String(inv);
     if (inv === 0) {
       cls = ' class="row-zero"';
-      invCell = '<span class="pill-zero">0</span>';
+      invCell = `<span style="color:#dc2626;font-weight:bold;">${inv}</span>`;
     } else if (inv === 1) {
       cls = ' class="row-one"';
-      invCell = '<span class="pill-one">1</span>';
+      invCell = `<span style="color:#f97316;font-weight:bold;">${inv}</span>`;
+    } else {
+      invCell = `<span style="font-weight:600;">${inv}</span>`;
     }
-    
-    const marginPercent = r.compare_at_price && r.unitPrice ? 
-      (((r.compare_at_price - r.unitPrice) / r.compare_at_price) * 100).toFixed(1) + '%' : 
-      '';
 
     return `
       <tr${cls}>
@@ -581,13 +607,23 @@ function renderProductsTable(rows, isEmail = false) {
   return `<h3>📊 Top productos vendidos</h3><table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
+// 5. FIX ORDINAMENTO ROP - critico prima
 function renderROPTable(rows, isEmail = false) {
   if (!rows.length) {
     return `<div style="margin:16px 0;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;text-align:center;"><strong style="color:#166534;">✅ Excelente!</strong> Todos los productos tienen stock suficiente.</div>`;
   }
   
+  // RIORDINA: critical -> high -> medium
+  const sortedRows = [...rows].sort((a,b) => {
+    const urgencyOrder = {critical: 0, high: 1, medium: 2};
+    const aOrder = urgencyOrder[a.urgency] ?? 3;
+    const bOrder = urgencyOrder[b.urgency] ?? 3;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return b.sales30d - a.sales30d; // Poi per vendite
+  });
+  
   const maxRows = isEmail ? 10 : 25;
-  const displayRows = rows.slice(0, maxRows);
+  const displayRows = sortedRows.slice(0, maxRows);
   
   const head = `
   <thead><tr>
@@ -825,6 +861,7 @@ export default async function handler(req, res) {
   }
 }
 
+// 7. FIX STATS - aggiungi totale vendite
 function buildCompleteHTML(data, isEmail = false) {
   const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData } = data;
   const totQty = rows.reduce((s,r)=>s+r.soldQty,0);
@@ -852,7 +889,7 @@ function buildCompleteHTML(data, isEmail = false) {
       </div>
     </header>
 
-    <!-- STATS SUMMARY -->
+    <!-- STATS SUMMARY CON TOTALE VENDITE -->
     <div class="stats-grid">
       <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">📦</div>
@@ -865,19 +902,19 @@ function buildCompleteHTML(data, isEmail = false) {
         <div class="stat-label">Órdenes procesadas</div>
       </div>
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">🔴</div>
-        <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)===0).length}</div>
-        <div class="stat-label">Sin inventario</div>
-      </div>
-      <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">🟠</div>
-        <div class="stat-number" style="color:#f97316;">${rows.filter(r=>Number(r.inventoryAvailable||0)===1).length}</div>
-        <div class="stat-label">Inventario bajo</div>
-      </div>
-      <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">💰</div>
+        <div class="stat-number">${money(totRev)}</div>
+        <div class="stat-label">Total vendite</div>
+      </div>
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">📊</div>
         <div class="stat-number">${money(totRev/orders.length || 0)}</div>
-        <div class="stat-label">Valor promedio orden</div>
+        <div class="stat-label">Ticket promedio</div>
+      </div>
+      <div class="stat-card">
+        <div style="font-size:20px;margin-bottom:4px;">⚠️</div>
+        <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
+        <div class="stat-label">Stock crítico</div>
       </div>
     </div>
 
