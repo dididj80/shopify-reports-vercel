@@ -231,6 +231,9 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
   // FETCH INVENTORY LEVELS con opzione location
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
+    // Aggiungi questa riga prima della chiamata fetchInventoryLevelsForItems
+    console.log("DEBUG: includeInactiveLocations =", includeInactiveLocations);
+    console.log("DEBUG: includeAllLocations =", includeAllLocations);
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeInactiveLocations);
     
     for (const r of rows) {
