@@ -1,7 +1,7 @@
-// /api/sales-report.js - Versione COMPLETA pulita
+// /api/sales-report.js - Versione COMPLETA con tutte le funzionalità ORIGINALI + inventario migliorato
 import { DateTime } from "luxon";
 
-// CACHE ottimizzata
+// CACHE ottimizzata - ORIGINALE
 const reportCache = new Map();
 function getCacheTTL(period, today) {
   if (today) return 3 * 60 * 1000;
@@ -34,7 +34,7 @@ function setCache(key, data, ttl) {
   reportCache.set(key, { data, timestamp: Date.now() });
 }
 
-// SHOPIFY API
+// SHOPIFY API - ORIGINALE
 const SHOP = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
@@ -53,8 +53,9 @@ async function shopFetchJson(url) {
   return json; 
 }
 
-// TIMEZONE
+// 1. FIX TIMEZONE - forza Monterrey/Mexico
 async function getShopTZ() {
+  // Forza timezone Monterrey invece di UTC
   return "America/Monterrey";
 }
 
@@ -83,7 +84,7 @@ async function computeRange(period, todayFlag) {
   return { tz, now, start, end };
 }
 
-// FETCH ORDERS
+// FETCH ORDERS con paginazione
 async function fetchOrdersPaidInRange(start, end) {
   const base = `/orders.json?status=any&financial_status=paid&limit=250` +
     `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
@@ -116,7 +117,7 @@ async function fetchOrdersPaidInRange(start, end) {
 // CHUNK helper
 const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>arr.slice(i*n,(i+1)*n));
 
-// FETCH VARIANTS
+// FETCH VARIANTS con inventory
 async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
@@ -141,7 +142,7 @@ async function fetchVariantsByIds(variantIds) {
   return out;
 }
 
-// INVENTORY LEVELS MIGLIORATA
+// FETCH INVENTORY LEVELS MIGLIORATA - Solo location attive per default
 async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   const ids = [...new Set(itemIds.filter(Boolean).map(String))];
   const res = Object.create(null);
@@ -154,6 +155,7 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
         const key = String(lvl.inventory_item_id);
         const available = Number(lvl.available || 0);
         
+        // VERIFICA SE LOCATION E' ATTIVA (se richiesto)
         if (!includeInactive) {
           let location = locationCache.get(lvl.location_id);
           if (!location) {
@@ -167,6 +169,7 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
             }
           }
           
+          // Solo location attive
           if (!location.active) continue;
         }
         
@@ -180,7 +183,7 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   return res;
 }
 
-// ELABORAZIONE PRODOTTI
+// ELABORAZIONE PRODOTTI COMPLETA
 async function processProductsComplete(orders, includeInactiveLocations = false) {
   const byVariant = new Map();
   const variantIds = new Set();
@@ -210,6 +213,7 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
   
   const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
   
+  // FETCH VARIANT INFO
   if (variantIds.size > 0) {
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     
@@ -224,6 +228,7 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
     }
   }
 
+  // FETCH INVENTORY LEVELS con opzione location
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeInactiveLocations);
@@ -243,7 +248,7 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
   return { rows, variantIds: [...variantIds] };
 }
 
-// CONVERSIONI
+// CONVERSIONI per canale
 function calculateConversions(orders) {
   const channelStats = {};
   
@@ -293,7 +298,7 @@ async function detectDeadStock(variantIds, now) {
     
     const deadVariantInfo = await fetchVariantsByIds(deadVariantIds);
     const deadItemIds = Array.from(deadVariantInfo.values()).map(v => v.inventory_item_id).filter(Boolean);
-    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds);
+    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds); // Solo location attive
     
     return deadVariantIds.map(vid => {
       const info = deadVariantInfo.get(String(vid));
@@ -362,14 +367,16 @@ function computeABCAnalysis(rows) {
   });
 }
 
-// GRAFICI
+// 4 GRAFICI COMPLETI
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
+// 3. FIX GRAFICI - gestisce dati singoli
 function donutSVG(parts, size=140) {
   if (!parts.length || parts.every(p => p.value === 0)) {
     return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:50%;color:#9ca3af;font-size:12px;">Sin datos</div>`;
   }
 
+  // Se c'e' UN SOLO dato, fai cerchio completo
   if (parts.length === 1) {
     return `
     <div style="width:${size}px;height:${size}px;border-radius:50%;background:${PALETTE[0]};display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:14px;margin:0 auto;">
@@ -397,16 +404,19 @@ function donutSVG(parts, size=140) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
 }
 
+// 4. FIX HORARIOS - usa timezone corretto
 function chartsHTML(orders, isEmail = false) {
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
 
+  // 1) Canali di vendita
   const chObj = {};
   for (const o of orders) {
     const ch = (o.source_name || "unknown").toLowerCase();
     chObj[ch] = (chObj[ch]||0) + pieces(o);
   }
 
+  // 2) Tipo di pago
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
@@ -416,8 +426,10 @@ function chartsHTML(orders, isEmail = false) {
     grpObj[type] = (grpObj[type]||0) + pieces(o);
   }
 
+  // 3) Franjas horarias - FIX TIMEZONE
   const hourObj = {};
   for (const o of orders) {
+    // Converti a timezone Monterrey
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
     const hour = orderDate.hour;
     
@@ -429,6 +441,7 @@ function chartsHTML(orders, isEmail = false) {
     hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
   }
 
+  // 4) Rangos de ticket
   const ticketObj = {};
   for (const o of orders) {
     const total = revenue(o);
@@ -519,6 +532,8 @@ function renderDeadStockAlert(deadStockData, isEmail = false) {
   </div>`;
 }
 
+// 6. FIX ABC ANALYSIS - mostra prodotti top
+
 function renderABCSummary(abcData) {
   const categories = {
     A: abcData.filter(r => r.abcCategory === 'A'),
@@ -530,22 +545,35 @@ function renderABCSummary(abcData) {
   
   return `
   <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
-    <h4 style="margin:0 0 12px;color:#0369a1;">Analisis ABC (Regla 80/20)</h4>
+    <h4 style="margin:0 0 12px;color:#0369a1;">📊 Análisis ABC (Regla 80/20)</h4>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px;">
       <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
         <div style="font-size:20px;font-weight:700;color:#dc2626;">A</div>
         <div style="font-size:12px;color:#6b7280;">TOP PERFORMERS</div>
         <div><strong>${categories.A.length}</strong> productos</div>
+        <div><strong>${((categories.A.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
+      </div>
+      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+        <div style="font-size:20px;font-weight:700;color:#f97316;">B</div>
+        <div style="font-size:12px;color:#6b7280;">MEDIANOS</div>
+        <div><strong>${categories.B.length}</strong> productos</div>
+        <div><strong>${((categories.B.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
+      </div>
+      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+        <div style="font-size:20px;font-weight:700;color:#6b7280;">C</div>
+        <div style="font-size:12px;color:#6b7280;">COLA LARGA</div>
+        <div><strong>${categories.C.length}</strong> productos</div>
+        <div><strong>${((categories.C.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
       </div>
     </div>
     
     <div style="background:white;border-radius:6px;padding:12px;">
-      <strong style="color:#dc2626;">TOP PERFORMERS (Categoria A):</strong>
+      <strong style="color:#dc2626;">🏆 TOP PERFORMERS (Categoria A):</strong>
       <div style="margin-top:8px;font-size:11px;line-height:1.4;">
         ${categories.A.slice(0,8).map((p, i) => `
           <div style="margin:2px 0;"><strong>${i+1}.</strong> ${esc(p.productTitle)} - ${money(p.revenue)} (${p.revenuePercent}%)</div>
         `).join('')}
-        ${categories.A.length > 8 ? `<div style="color:#6b7280;margin-top:4px;">... y ${categories.A.length - 8} productos mas</div>` : ''}
+        ${categories.A.length > 8 ? `<div style="color:#6b7280;margin-top:4px;">... y ${categories.A.length - 8} productos más</div>` : ''}
       </div>
     </div>
   </div>`;
@@ -693,7 +721,7 @@ function styles(isEmail = false) {
   </style>`;
 }
 
-// MAIN HANDLER
+// MAIN HANDLER con opzione per inventory globale
 export default async function handler(req, res) {
   const startTime = Date.now();
   const timing = {};
@@ -704,6 +732,7 @@ export default async function handler(req, res) {
     const email = req.query.email === "1";
     const preview = req.query.preview === "1";
     const debug = req.query.debug === "1";
+    
     const includeAllLocations = req.query.include_all_locations === "1";
 
     const { tz, now, start, end } = await computeRange(period, today);
@@ -733,6 +762,7 @@ export default async function handler(req, res) {
 
     const { rows, variantIds } = await processProductsComplete(orders, includeAllLocations);
     const conversions = calculateConversions(orders);
+    
     const deadStockData = await detectDeadStock(variantIds, now);
     
     const start30 = now.minus({days:30}).startOf("day");
@@ -848,6 +878,7 @@ function buildCompleteHTML(data, isEmail = false) {
 
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
+  
   const inventoryNote = includeAllLocations ? ' (Inventario GLOBAL - todas las locations)' : ' (Solo locations activas)';
 
   return `<!doctype html>
@@ -931,16 +962,4 @@ function buildCompleteHTML(data, isEmail = false) {
   </div>
 </body>
 </html>`;
-}>
-      </div>
-      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
-        <div style="font-size:20px;font-weight:700;color:#f97316;">B</div>
-        <div style="font-size:12px;color:#6b7280;">MEDIANOS</div>
-        <div><strong>${categories.B.length}</strong> productos</div>
-        <div><strong>${((categories.B.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
-      </div>
-      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
-        <div style="font-size:20px;font-weight:700;color:#6b7280;">C</div>
-        <div style="font-size:12px;color:#6b7280;">COLA LARGA</div>
-        <div><strong>${categories.C.length}</strong> productos</div>
-        <div><strong>${((categories.C.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div
+}          
