@@ -122,46 +122,37 @@ async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
   
-  for (const c of chunk(ids, 50)) {
+  console.log(`Fetching ${ids.length} variants individually...`);
+  
+  for (const variantId of ids) {
     try {
-      // Prima prova il metodo batch
-      const { variants } = await shopFetchJson(REST(`/variants.json?ids=${encodeURIComponent(c.join(","))}`));
+      // Usa chiamate individuali come il debug inventory
+      const { variant } = await shopFetchJson(REST(`/variants/${variantId}.json`));
       
-      for (const v of variants || []) {
-        // Se manca inventory_item_id, fai una chiamata individuale
-        if (!v.inventory_item_id && v.id) {
-          console.log(`Fetching individual variant ${v.id} due to missing inventory_item_id`);
-          try {
-            const individualVariant = await shopFetchJson(REST(`/variants/${v.id}.json`));
-            if (individualVariant.variant) {
-              Object.assign(v, individualVariant.variant);
-            }
-          } catch (err) {
-            console.error(`Error fetching individual variant ${v.id}:`, err.message);
-          }
-        }
-        
-        out.set(String(v.id), {
-          inventory_item_id: v.inventory_item_id,
-          inventory_quantity: v.inventory_quantity,
-          inventory_management: v.inventory_management || "",
-          sku: v.sku || "",
-          price: v.price || "0",
-          compare_at_price: v.compare_at_price
+      if (variant) {
+        out.set(String(variant.id), {
+          inventory_item_id: variant.inventory_item_id,
+          inventory_quantity: variant.inventory_quantity,
+          inventory_management: variant.inventory_management || "",
+          sku: variant.sku || "",
+          price: variant.price || "0",
+          compare_at_price: variant.compare_at_price
         });
         
-        if (v.sku === "7508006184500") {
-          console.log("PANALAB VARIANT PROCESSED:", {
-            id: v.id,
-            sku: v.sku,
-            inventory_item_id: v.inventory_item_id
+        if (variant.sku === "7508006184500") {
+          console.log("PANALAB INDIVIDUAL FETCH:", {
+            id: variant.id,
+            sku: variant.sku,
+            inventory_item_id: variant.inventory_item_id
           });
         }
       }
     } catch (err) {
-      console.error(`Error fetch variants:`, err.message);
+      console.error(`Error fetch variant ${variantId}:`, err.message);
     }
   }
+  
+  console.log(`Successfully fetched ${out.size} of ${ids.length} variants`);
   return out;
 }
 
