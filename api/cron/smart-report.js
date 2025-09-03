@@ -32,7 +32,7 @@ export default async function handler(req, res) {
     }
 
     const results = [];
-    const baseUrl = process.env.VERCEL_URL || `https://${req.headers.host}`;
+    const baseUrl = `https://${req.headers.host}`;
 
     console.log('DEBUG - baseUrl:', baseUrl);
     console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
