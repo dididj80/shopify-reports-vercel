@@ -115,7 +115,8 @@ export default async function handler(req, res) {
     );
 
     // 5) INVIO con RESEND - ENHANCED DEBUGGING
-    const fromEmail = /*process.env.FROM_EMAIL ||*/ 'onboarding@resend.dev';
+    // TEMP FIX: Force use of resend domain until custom domain is verified
+    const fromEmail = 'onboarding@resend.dev'; // process.env.FROM_EMAIL || 'onboarding@resend.dev';
     
     console.log('🔍 DEBUG Email config:');
     console.log('- RESEND_API_KEY exists:', !!process.env.RESEND_API_KEY);
