@@ -32,7 +32,21 @@ export default async function handler(req, res) {
     }
 
     const results = [];
-    const baseUrl = process.env.VERCEL_URL || 'https://shopify-reports-vercel.vercel.app';
+   // FIX URL CONSTRUCTION - Same logic as send-sales-email.js
+    let baseUrl;
+    if (process.env.VERCEL_URL) {
+      // VERCEL_URL può essere solo il dominio, aggiungiamo https://
+      baseUrl = process.env.VERCEL_URL.startsWith('http') 
+        ? process.env.VERCEL_URL 
+        : `https://${process.env.VERCEL_URL}`;
+    } else if (req.headers.host) {
+      // Fallback usando req.headers.host
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
+      baseUrl = `${protocol}://${req.headers.host}`;
+    } else {
+      // Ultimo fallback hardcoded
+      baseUrl = 'https://shopify-reports-vercel.vercel.app';
+    }
 
     console.log('DEBUG - baseUrl:', baseUrl);
     console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
