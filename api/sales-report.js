@@ -864,7 +864,7 @@ export default async function handler(req, res) {
     const reportData = {
       success: true,
       label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData,
-      includeAllLocations,
+      includeAllLocations: includeAllLocations,
       stats: {
         totalProducts: rows.length,
         totalRevenue: rows.reduce((s,r)=>s+r.revenue,0),
