@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/smart-report",
-      "schedule": "30 14 * * *"
+      "schedule": "45 17 * * *"
     }
   ],
   "functions": {
