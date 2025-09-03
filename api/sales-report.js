@@ -911,7 +911,7 @@ function buildCompleteHTML(data, isEmail = false) {
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
   
-const inventoryNote = (data.includeAllLocations || includeAllLocations) ? ' (Inventario GLOBAL - todas las locations)' : ' (Solo locations activas)';
+const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas las locations)' : ' (Solo locations activas)';
 
   return `<!doctype html>
 <html lang="es">
