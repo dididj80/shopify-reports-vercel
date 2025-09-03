@@ -34,6 +34,10 @@ export default async function handler(req, res) {
     const results = [];
     const baseUrl = process.env.VERCEL_URL || `https://${req.headers.host}`;
 
+    console.log('DEBUG - baseUrl:', baseUrl);
+    console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
+    console.log('DEBUG - req.headers.host:', req.headers.host);
+    
     // 1) SEMPRE: Report giornaliero (ieri)
     console.log('📧 Inviando report giornaliero...');
     try {
@@ -114,6 +118,9 @@ export default async function handler(req, res) {
 // Helper per inviare singolo report
 async function sendReport({ period, recipients, today = false, customMessage, baseUrl }) {
   const startTime = Date.now();
+
+  const fullUrl = `${baseUrl}/api/send-sales-email`;
+  console.log('DEBUG - Full URL for fetch:', fullUrl);
   
   try {
     const response = await fetch(`${baseUrl}/api/send-sales-email`, {
