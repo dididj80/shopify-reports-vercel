@@ -121,11 +121,23 @@ const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>a
 async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
+
+
+  console.log("FETCH VARIANTS - IDs to fetch:", variantIds);
   
   for (const c of chunk(ids, 50)) {
     try {
       const { variants } = await shopFetchJson(REST(`/variants.json?ids=${encodeURIComponent(c.join(","))}`));
+      console.log("FETCH VARIANTS - Response:", variants?.length, "variants");
       for (const v of variants || []) {
+             if (v.sku === "7508006184500") {
+        console.log("PANALAB VARIANT FOUND:", {
+          id: v.id,
+          sku: v.sku,
+          inventory_item_id: v.inventory_item_id,
+          inventory_quantity: v.inventory_quantity
+        });
+      }
         out.set(String(v.id), {
           inventory_item_id: v.inventory_item_id,
           inventory_quantity: v.inventory_quantity,
