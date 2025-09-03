@@ -116,11 +116,9 @@ export default async function handler(req, res) {
 }
 
 // Helper per inviare singolo report
+// Helper per inviare singolo report
 async function sendReport({ period, recipients, today = false, customMessage, baseUrl }) {
   const startTime = Date.now();
-
-  const fullUrl = `${baseUrl}/api/send-sales-email`;
-  console.log('DEBUG - Full URL for fetch:', fullUrl);
   
   try {
     const response = await fetch(`${baseUrl}/api/send-sales-email`, {
@@ -142,19 +140,27 @@ async function sendReport({ period, recipients, today = false, customMessage, ba
     console.log('DEBUG - Response status:', response.status);
     console.log('DEBUG - Response headers:', Object.fromEntries(response.headers));
     console.log('DEBUG - Response body:', responseText.substring(0, 200));
-    
-    const result = await response.json();
+
+    // Poi prova il parse JSON
+    let result;
+    try {
+      result = JSON.parse(responseText);
+    } catch (err) {
+      console.error('JSON parse error:', err.message);
+      return { success: false, error: `Invalid JSON response: ${responseText.substring(0, 100)}` };
+    }
+
     const duration = Date.now() - startTime;
     
     if (result.success) {
-      console.log(`✅ Report ${period} sent successfully in ${duration}ms - Resend ID: ${result.messageId}`);
+      console.log(`Report ${period} sent successfully in ${duration}ms - Resend ID: ${result.messageId}`);
       return { 
         ...result, 
         duration,
         success: true 
       };
     } else {
-      console.error(`❌ Report ${period} failed:`, result.error);
+      console.error(`Report ${period} failed:`, result.error);
       return { 
         success: false, 
         error: result.error,
