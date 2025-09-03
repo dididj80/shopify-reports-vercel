@@ -238,6 +238,7 @@ console.log("PANALAB DEBUG - Item IDs to fetch:", debugItemIds);
     
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
+    console.log("PANALAB DEBUG - Inventory levels received:", invLevels);
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
       if (r.sku === "7508006184500") { // SKU di Panalab LERA-CO
