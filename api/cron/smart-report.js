@@ -137,6 +137,12 @@ async function sendReport({ period, recipients, today = false, customMessage, ba
       })
     });
 
+    // AGGIUNGI QUESTO DEBUG
+    const responseText = await response.text();
+    console.log('DEBUG - Response status:', response.status);
+    console.log('DEBUG - Response headers:', Object.fromEntries(response.headers));
+    console.log('DEBUG - Response body:', responseText.substring(0, 200));
+    
     const result = await response.json();
     const duration = Date.now() - startTime;
     
