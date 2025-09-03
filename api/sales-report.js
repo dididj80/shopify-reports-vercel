@@ -229,10 +229,12 @@ async function processProductsComplete(orders, includeAllLocations) {
   }
 
   // Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
-const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
-console.log("PANALAB DEBUG - Item IDs to fetch:", itemIds);
+// Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
+const debugItemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
+console.log("PANALAB DEBUG - Item IDs to fetch:", debugItemIds);
 
-// E dopo aver ottenuto gli inventory levels
+const invLevels = await fetchInventoryLevelsForItems(itemIds, includeInactiveLocations);
+
 console.log("PANALAB DEBUG - Inventory levels received:", invLevels);
 
 // E nel loop dove assegni l'inventory
@@ -241,8 +243,11 @@ for (const r of rows) {
   if (r.sku === "7508006184500") { // SKU di Panalab LERA-CO
     console.log("PANALAB DEBUG:", {
       sku: r.sku,
+      product: r.productTitle,
+      variant_id: r.variantId,
       inventory_item_id: iid,
       inventory_from_levels: invLevels[iid],
+      variant_fallback: r._variantFallbackQty,
       final_inventory: r.inventoryAvailable
     });
   }
