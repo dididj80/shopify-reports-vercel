@@ -28,18 +28,28 @@ export default async function handler(req, res) {
 
     console.log(`📧 Inviando report ${period} a ${recipients.length} destinatari`);
 
- // 1) Genera report JSON - FIX URL CONSTRUCTION
+    // 1) Genera report JSON - ROBUST URL CONSTRUCTION
     let baseUrl;
+    
+    // Debug logging
+    console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
+    console.log('DEBUG - req.headers.host:', req.headers.host);
+    
     if (process.env.VERCEL_URL) {
-      // VERCEL_URL non include https://, quindi lo aggiungiamo
+      // VERCEL_URL può essere solo il dominio, aggiungiamo https://
       baseUrl = process.env.VERCEL_URL.startsWith('http') 
         ? process.env.VERCEL_URL 
         : `https://${process.env.VERCEL_URL}`;
-    } else {
+    } else if (req.headers.host) {
       // Fallback usando req.headers.host
       const protocol = req.headers['x-forwarded-proto'] || 'https';
       baseUrl = `${protocol}://${req.headers.host}`;
+    } else {
+      // Ultimo fallback per cron jobs
+      baseUrl = 'https://shopify-reports-vercel.vercel.app';
     }
+    
+    console.log('DEBUG - Final baseUrl:', baseUrl);
 
     const reportUrl = `${baseUrl}/api/sales-report`;
     const params = new URLSearchParams({ 
@@ -129,12 +139,13 @@ export default async function handler(req, res) {
         }
       ],
       
-      tags: [
-        { name: 'type', value: 'sales-report' },
-        { name: 'period', value: period },
-        { name: 'domain', value: fromEmail.includes('resend.dev') ? 'trial' : 'custom' }
-      ]
-    });
+    const emailResult = await resend.emails.send(emailPayload);
+    
+    console.log('📧 Resend response:', JSON.stringify(emailResult, null, 2));
+    
+    if (!emailResult || !emailResult.id) {
+      throw new Error(`Invalid Resend response: ${JSON.stringify(emailResult)}`);
+    }
     
     console.log(`✅ Email inviata via Resend - ID: ${emailResult.id}`);
 
