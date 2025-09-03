@@ -28,8 +28,19 @@ export default async function handler(req, res) {
 
     console.log(`📧 Inviando report ${period} a ${recipients.length} destinatari`);
 
-    // 1) Genera report JSON
-    const baseUrl = process.env.VERCEL_URL || `https://${req.headers.host}`;
+ // 1) Genera report JSON - FIX URL CONSTRUCTION
+    let baseUrl;
+    if (process.env.VERCEL_URL) {
+      // VERCEL_URL non include https://, quindi lo aggiungiamo
+      baseUrl = process.env.VERCEL_URL.startsWith('http') 
+        ? process.env.VERCEL_URL 
+        : `https://${process.env.VERCEL_URL}`;
+    } else {
+      // Fallback usando req.headers.host
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
+      baseUrl = `${protocol}://${req.headers.host}`;
+    }
+
     const reportUrl = `${baseUrl}/api/sales-report`;
     const params = new URLSearchParams({ 
       period, 
