@@ -32,7 +32,7 @@ export default async function handler(req, res) {
     }
 
     const results = [];
-    const baseUrl = `https://${req.headers.host}`;
+    const baseUrl = process.env.VERCEL_URL || 'https://shopify-reports-vercel.vercel.app';
 
     console.log('DEBUG - baseUrl:', baseUrl);
     console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
