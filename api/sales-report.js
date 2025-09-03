@@ -778,7 +778,7 @@ export default async function handler(req, res) {
           res.setHeader("X-Cache", "HIT");
           return res.status(200).json(cached);
         } else {
-          const html = buildCompleteHTML({...cached, includeAllLocations}, email || preview);
+          const html = buildCompleteHTML({...cached, includeAllLocations: includeAllLocations}, email || preview);
           res.setHeader("Content-Type", "text/html");
           res.setHeader("X-Cache", "HIT");
           return res.status(200).send(html);
