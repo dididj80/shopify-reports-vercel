@@ -235,15 +235,12 @@ async function processProductsComplete(orders, includeAllLocations) {
 // Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
 const debugItemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
 console.log("PANALAB DEBUG - Item IDs to fetch:", debugItemIds);
-
-const invLevels = await fetchInventoryLevelsForItems(itemIds, includeInactiveLocations);
-
-console.log("PANALAB DEBUG - Inventory levels received:", invLevels);
-
-// E nel loop dove assegni l'inventory
-for (const r of rows) {
-  const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
-  if (r.sku === "7508006184500") { // SKU di Panalab LERA-CO
+    
+    const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
+    
+    for (const r of rows) {
+      const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
+      if (r.sku === "7508006184500") { // SKU di Panalab LERA-CO
     console.log("PANALAB DEBUG:", {
       sku: r.sku,
       product: r.productTitle,
@@ -253,13 +250,7 @@ for (const r of rows) {
       variant_fallback: r._variantFallbackQty,
       final_inventory: r.inventoryAvailable
     });
-  }
-}
-    
-    const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
-    
-    for (const r of rows) {
-      const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
+      }
       if (iid && invLevels[iid] != null) {
         r.inventoryAvailable = invLevels[iid];
       } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
