@@ -1,4 +1,4 @@
-// /api/send-sales-email.js - RESEND implementation
+// /api/send-sales-email.js - RESEND implementation - FIXED
 import { Resend } from 'resend';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -114,14 +114,21 @@ export default async function handler(req, res) {
       `${debugLinks}$&`
     );
 
-    // 5) INVIO con RESEND (configurazione semplificata)
+    // 5) INVIO con RESEND - ENHANCED DEBUGGING
     const fromEmail = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+    
+    console.log('🔍 DEBUG Email config:');
+    console.log('- RESEND_API_KEY exists:', !!process.env.RESEND_API_KEY);
+    console.log('- RESEND_API_KEY length:', process.env.RESEND_API_KEY?.length || 0);
+    console.log('- FROM_EMAIL:', process.env.FROM_EMAIL || 'not set');
+    console.log('- Recipients count:', testMode ? 1 : recipients.length);
+    console.log('- Recipients:', testMode ? [recipients[0]] : recipients);
     
     if (fromEmail === 'onboarding@resend.dev') {
       console.log('⚠️  Usando dominio temporaneo Resend. Per produzione, configura un dominio proprio.');
     }
 
-    const emailResult = await resend.emails.send({
+    const emailPayload = {
       from: fromEmail.includes('@') ? fromEmail : `Sales Report <${fromEmail}>`,
       to: testMode ? [recipients[0]] : recipients,
       subject: subjectLine,
@@ -139,12 +146,33 @@ export default async function handler(req, res) {
         }
       ],
       
+      tags: [
+        { name: 'type', value: 'sales-report' },
+        { name: 'period', value: period },
+        { name: 'domain', value: fromEmail.includes('resend.dev') ? 'trial' : 'custom' }
+      ]
+    };
+    
+    console.log('🚀 Sending email with payload structure:', JSON.stringify({
+      from: emailPayload.from,
+      to: emailPayload.to,
+      subject: emailPayload.subject,
+      hasHtml: !!emailPayload.html,
+      hasText: !!emailPayload.text,
+      attachmentsCount: emailPayload.attachments.length,
+      tagsCount: emailPayload.tags.length
+    }, null, 2));
+
     const emailResult = await resend.emails.send(emailPayload);
     
     console.log('📧 Resend response:', JSON.stringify(emailResult, null, 2));
     
-    if (!emailResult || !emailResult.id) {
-      throw new Error(`Invalid Resend response: ${JSON.stringify(emailResult)}`);
+    if (!emailResult) {
+      throw new Error('Resend returned null/undefined response');
+    }
+    
+    if (!emailResult.id) {
+      throw new Error(`Resend response missing ID: ${JSON.stringify(emailResult)}`);
     }
     
     console.log(`✅ Email inviata via Resend - ID: ${emailResult.id}`);
@@ -176,6 +204,7 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error('❌ Resend email error:', err);
+    console.error('❌ Error stack:', err.stack);
     
     const errorDetail = {
       success: false,
@@ -184,6 +213,7 @@ export default async function handler(req, res) {
       provider: 'resend',
       config: {
         hasApiKey: !!process.env.RESEND_API_KEY,
+        apiKeyLength: process.env.RESEND_API_KEY?.length || 0,
         hasFromEmail: !!process.env.FROM_EMAIL,
         fromEmail: process.env.FROM_EMAIL ? 'configured' : 'missing'
       }
