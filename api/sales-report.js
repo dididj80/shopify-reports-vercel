@@ -139,13 +139,6 @@ async function fetchVariantsByIds(variantIds) {
           compare_at_price: variant.compare_at_price
         });
         
-        if (variant.sku === "7508006184500") {
-          console.log("PANALAB INDIVIDUAL FETCH:", {
-            id: variant.id,
-            sku: variant.sku,
-            inventory_item_id: variant.inventory_item_id
-          });
-        }
       }
     } catch (err) {
       console.error(`Error fetch variant ${variantId}:`, err.message);
@@ -246,26 +239,13 @@ async function processProductsComplete(orders, includeAllLocations) {
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
 
-// Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
-const debugItemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
-console.log("PANALAB DEBUG - Item IDs to fetch:", debugItemIds);
-    
+    // Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
+    const debugItemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
+   
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
-    console.log("PANALAB DEBUG - Inventory levels received:", invLevels);
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
-      if (r.sku === "7508006184500") { // SKU di Panalab LERA-CO
-    console.log("PANALAB DEBUG:", {
-      sku: r.sku,
-      product: r.productTitle,
-      variant_id: r.variantId,
-      inventory_item_id: iid,
-      inventory_from_levels: invLevels[iid],
-      variant_fallback: r._variantFallbackQty,
-      final_inventory: r.inventoryAvailable
-    });
-      }
       if (iid && invLevels[iid] != null) {
         r.inventoryAvailable = invLevels[iid];
       } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
