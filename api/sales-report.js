@@ -228,7 +228,10 @@ async function processProductsComplete(orders, includeAllLocations) {
     }
   }
 
-  // Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
+  // FETCH INVENTORY LEVELS con opzione location
+  const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
+  if (itemIds.length > 0) {
+
 // Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
 const debugItemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
 console.log("PANALAB DEBUG - Item IDs to fetch:", debugItemIds);
@@ -252,10 +255,7 @@ for (const r of rows) {
     });
   }
 }
-
-  // FETCH INVENTORY LEVELS con opzione location
-  const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
-  if (itemIds.length > 0) {
+    
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
     for (const r of rows) {
