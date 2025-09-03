@@ -417,13 +417,42 @@ function chartsHTML(orders, isEmail = false) {
   }
 
   // 2) Tipo di pago
+  // SISTEMA PAGAMENTI MIGLIORATO
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
+    
+    // Analizza i gateway per determinare il tipo di pagamento
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
-    const hasCard = gws.some(g => g.toLowerCase().includes("stripe") || g.toLowerCase().includes("shopify"));
-    const type = hasCash && hasCard ? "Mixto" : hasCash ? "Efectivo" : "Tarjeta";
-    grpObj[type] = (grpObj[type]||0) + pieces(o);
+    const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
+    const hasFiserv = gws.some(g => g.toLowerCase().includes("fiserv"));
+    const hasShopifyPayments = gws.some(g => g.toLowerCase().includes("shopify_payments"));
+    const hasMercadoPago = gws.some(g => g.toLowerCase().includes("mercado"));
+    
+    let paymentType;
+    
+    // Logica di classificazione migliorata
+    if (hasCash && hasFiserv) {
+      paymentType = "Mixto (Cash + Terminal)";
+    } else if (hasCash && hasPayPal) {
+      paymentType = "Mixto (Cash + PayPal)";
+    } else if (hasCash && hasShopifyPayments) {
+      paymentType = "Mixto (Cash + Tarjeta)";
+    } else if (hasCash) {
+      paymentType = "Efectivo";
+    } else if (hasPayPal) {
+      paymentType = "PayPal";
+    } else if (hasFiserv) {
+      paymentType = "Terminal Fiserv";
+    } else if (hasShopifyPayments) {
+      paymentType = "Tarjeta (Shopify)";
+    } else if (hasMercadoPago) {
+      paymentType = "Mercado Pago";
+    } else {
+      paymentType = `Otro (${gws.join(', ')})`;
+    }
+    
+    grpObj[paymentType] = (grpObj[paymentType]||0) + pieces(o);
   }
 
   // 3) Franjas horarias - FIX TIMEZONE
