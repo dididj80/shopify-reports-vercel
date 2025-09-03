@@ -438,6 +438,8 @@ function chartsHTML(orders, isEmail = false) {
       paymentType = "Mixto (Cash + PayPal)";
     } else if (hasCash && hasShopifyPayments) {
       paymentType = "Mixto (Cash + Tarjeta)";
+    } else if (hasCash && hasFiserv) {
+      paymentType = "Mixto (Cash + Tarjeta)";
     } else if (hasCash) {
       paymentType = "Efectivo";
     } else if (hasPayPal) {
