@@ -384,7 +384,7 @@ function computeABCAnalysis(rows) {
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
 // 3. FIX GRAFICI - gestisce dati singoli
-function donutSVG(parts, size=140) {
+/*function donutSVG(parts, size=140) {
   if (!parts.length || parts.every(p => p.value === 0)) {
     return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:50%;color:#9ca3af;font-size:12px;">Sin datos</div>`;
   }
@@ -415,6 +415,55 @@ function donutSVG(parts, size=140) {
   segs += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#374151" font-weight="600" font-size="14">${totalLabel}</text>`;
   
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
+}*/
+// Función para generar URLs de gráficos estáticos con QuickChart
+function generateChartUrl(chartConfig, width = 140, height = 140) {
+  const config = {
+    ...chartConfig,
+    options: {
+      ...chartConfig.options,
+      plugins: {
+        legend: { display: false }, // Sin leyenda para que sea más compacto
+        datalabels: { display: false }
+      }
+    }
+  };
+  
+  const encodedConfig = encodeURIComponent(JSON.stringify(config));
+  return `https://quickchart.io/chart?c=${encodedConfig}&w=${width}&h=${height}&f=png&bkg=white`;
+}
+
+function donutSVG(parts, size = 140) {
+  if (!parts.length || parts.every(p => p.value === 0)) {
+    return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;color:#9ca3af;font-size:12px;">Sin datos</div>`;
+  }
+
+  // Configuración Chart.js para QuickChart
+  const chartConfig = {
+    type: 'doughnut',
+    data: {
+      labels: parts.map(p => p.label),
+      datasets: [{
+        data: parts.map(p => p.value),
+        backgroundColor: parts.map((_, i) => PALETTE[i % PALETTE.length]),
+        borderColor: '#ffffff',
+        borderWidth: 2
+      }]
+    },
+    options: {
+      responsive: false,
+      maintainAspectRatio: false,
+      cutout: '60%', // Para hacer el donut
+      plugins: {
+        legend: { display: false },
+        datalabels: { display: false }
+      }
+    }
+  };
+
+  const chartUrl = generateChartUrl(chartConfig, size, size);
+  
+  return `<img src="${chartUrl}" alt="Chart" style="width:${size}px;height:${size}px;border-radius:8px;" onerror="this.style.display='none';" />`;
 }
 
 // 4. FIX HORARIOS - usa timezone corretto
