@@ -1,7 +1,7 @@
-// /api/sales-report.js - Versione COMPLETA con tutte le funzionalità ORIGINALI + inventario migliorato
+// /api/sales-report.js - Versione COMPLETA pulita
 import { DateTime } from "luxon";
 
-// CACHE ottimizzata - ORIGINALE
+// CACHE ottimizzata
 const reportCache = new Map();
 function getCacheTTL(period, today) {
   if (today) return 3 * 60 * 1000;
@@ -34,7 +34,7 @@ function setCache(key, data, ttl) {
   reportCache.set(key, { data, timestamp: Date.now() });
 }
 
-// SHOPIFY API - ORIGINALE
+// SHOPIFY API
 const SHOP = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
@@ -53,7 +53,7 @@ async function shopFetchJson(url) {
   return json; 
 }
 
-// TIMEZONE - ORIGINALE
+// TIMEZONE
 async function getShopTZ() {
   return "America/Monterrey";
 }
@@ -83,7 +83,7 @@ async function computeRange(period, todayFlag) {
   return { tz, now, start, end };
 }
 
-// FETCH ORDERS - ORIGINALE
+// FETCH ORDERS
 async function fetchOrdersPaidInRange(start, end) {
   const base = `/orders.json?status=any&financial_status=paid&limit=250` +
     `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
@@ -113,10 +113,10 @@ async function fetchOrdersPaidInRange(start, end) {
   }
 }
 
-// CHUNK helper - ORIGINALE
+// CHUNK helper
 const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>arr.slice(i*n,(i+1)*n));
 
-// FETCH VARIANTS - ORIGINALE
+// FETCH VARIANTS
 async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
@@ -141,7 +141,7 @@ async function fetchVariantsByIds(variantIds) {
   return out;
 }
 
-// INVENTORY LEVELS MIGLIORATA - Solo location attive per default
+// INVENTORY LEVELS MIGLIORATA
 async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   const ids = [...new Set(itemIds.filter(Boolean).map(String))];
   const res = Object.create(null);
@@ -154,7 +154,6 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
         const key = String(lvl.inventory_item_id);
         const available = Number(lvl.available || 0);
         
-        // VERIFICA SE LOCATION È ATTIVA (se richiesto)
         if (!includeInactive) {
           let location = locationCache.get(lvl.location_id);
           if (!location) {
@@ -168,7 +167,6 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
             }
           }
           
-          // Solo location attive
           if (!location.active) continue;
         }
         
@@ -182,7 +180,7 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   return res;
 }
 
-// ELABORAZIONE PRODOTTI - ORIGINALE (con inventory migliorato)
+// ELABORAZIONE PRODOTTI
 async function processProductsComplete(orders, includeInactiveLocations = false) {
   const byVariant = new Map();
   const variantIds = new Set();
@@ -212,7 +210,6 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
   
   const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
   
-  // FETCH VARIANT INFO
   if (variantIds.size > 0) {
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     
@@ -227,7 +224,6 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
     }
   }
 
-  // FETCH INVENTORY LEVELS con opzione location
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeInactiveLocations);
@@ -247,7 +243,7 @@ async function processProductsComplete(orders, includeInactiveLocations = false)
   return { rows, variantIds: [...variantIds] };
 }
 
-// CONVERSIONI - ORIGINALE
+// CONVERSIONI
 function calculateConversions(orders) {
   const channelStats = {};
   
@@ -277,7 +273,7 @@ function calculateConversions(orders) {
   }).sort((a,b) => b.orders - a.orders);
 }
 
-// DEAD STOCK DETECTION - ORIGINALE
+// DEAD STOCK DETECTION
 async function detectDeadStock(variantIds, now) {
   try {
     const deadStockDays = 60;
@@ -323,7 +319,7 @@ async function detectDeadStock(variantIds, now) {
   }
 }
 
-// ROP CALCULATION - ORIGINALE
+// ROP CALCULATION
 function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
   const dailyVel = Math.max(0, sales30d/30);
   const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
@@ -338,12 +334,12 @@ function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
   return { 
     dailyVel: dailyVel.toFixed(2), 
     rop, target, qty, 
-    coverage: Number.isFinite(coverage) ? coverage.toFixed(1) : '∞',
+    coverage: Number.isFinite(coverage) ? coverage.toFixed(1) : 'inf',
     urgency 
   };
 }
 
-// ABC ANALYSIS - ORIGINALE
+// ABC ANALYSIS
 function computeABCAnalysis(rows) {
   const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
   let cumulativeRevenue = 0;
@@ -366,7 +362,7 @@ function computeABCAnalysis(rows) {
   });
 }
 
-// GRAFICI COMPLETI - ORIGINALI
+// GRAFICI
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
 function donutSVG(parts, size=140) {
@@ -405,14 +401,12 @@ function chartsHTML(orders, isEmail = false) {
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
 
-  // 1) Canali di vendita
   const chObj = {};
   for (const o of orders) {
     const ch = (o.source_name || "unknown").toLowerCase();
     chObj[ch] = (chObj[ch]||0) + pieces(o);
   }
 
-  // 2) Tipo di pago
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
@@ -422,7 +416,6 @@ function chartsHTML(orders, isEmail = false) {
     grpObj[type] = (grpObj[type]||0) + pieces(o);
   }
 
-  // 3) Franjas horarias
   const hourObj = {};
   for (const o of orders) {
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
@@ -430,13 +423,12 @@ function chartsHTML(orders, isEmail = false) {
     
     const timeSlot = 
       hour < 6 ? "Madrugada (00-06)" :
-      hour < 12 ? "Mañana (06-12)" :
+      hour < 12 ? "Manana (06-12)" :
       hour < 18 ? "Tarde (12-18)" :
       "Noche (18-24)";
     hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
   }
 
-  // 4) Rangos de ticket
   const ticketObj = {};
   for (const o of orders) {
     const total = revenue(o);
@@ -451,10 +443,10 @@ function chartsHTML(orders, isEmail = false) {
   const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
 
   const sections = [
-    { title:"📦 Canales de venta", parts: top(chObj) },
-    { title:"💰 Tipo de pago", parts: top(grpObj) },
-    { title:"🕐 Horarios de venta", parts: Object.entries(hourObj).map(([k,v])=>({label:k,value:v})) },
-    { title:"🎯 Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
+    { title:"Canales de venta", parts: top(chObj) },
+    { title:"Tipo de pago", parts: top(grpObj) },
+    { title:"Horarios de venta", parts: Object.entries(hourObj).map(([k,v])=>({label:k,value:v})) },
+    { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
   ];
 
   const chartSize = isEmail ? 100 : 140;
@@ -482,19 +474,19 @@ function chartsHTML(orders, isEmail = false) {
   </div>`;
 }
 
-// RENDER FUNCTIONS - ORIGINALI
+// RENDER FUNCTIONS
 function renderConversionAnalysis(conversionData, isEmail = false) {
   if (!conversionData.length) return '';
   
   return `
   <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
-    <h4 style="margin:0 0 12px;color:#0369a1;">🎯 Conversion Rate por Canal</h4>
+    <h4 style="margin:0 0 12px;color:#0369a1;">Conversion Rate por Canal</h4>
     <div style="display:grid;grid-template-columns:repeat(${isEmail ? 2 : 3},1fr);gap:12px;">
       ${conversionData.slice(0, isEmail ? 4 : 6).map(data => `
         <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
           <div style="font-weight:600;color:#374151;font-size:${isEmail ? 11 : 12}px;">${data.channel}</div>
           <div style="font-size:${isEmail ? 16 : 20}px;font-weight:700;color:#0369a1;margin:4px 0;">${data.conversionRate}%</div>
-          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${data.orders} órdenes</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${data.orders} ordenes</div>
           <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">AOV: $${data.aov}</div>
         </div>
       `).join('')}
@@ -504,7 +496,7 @@ function renderConversionAnalysis(conversionData, isEmail = false) {
 
 function renderDeadStockAlert(deadStockData, isEmail = false) {
   if (!deadStockData.length) {
-    return `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:20px 0;text-align:center;"><strong style="color:#166534;">✅ ¡Excelente!</strong> No hay productos estancados (sin ventas 60+ días)</div>`;
+    return `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:20px 0;text-align:center;"><strong style="color:#166534;">Excelente!</strong> No hay productos estancados (sin ventas 60+ dias)</div>`;
   }
   
   const totalValue = deadStockData.reduce((s, item) => s + item.totalValue, 0);
@@ -512,7 +504,7 @@ function renderDeadStockAlert(deadStockData, isEmail = false) {
   
   return `
   <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px;margin:20px 0;">
-    <h4 style="margin:0 0 12px;color:#dc2626;">💀 Dead Stock Alert (60+ días sin ventas)</h4>
+    <h4 style="margin:0 0 12px;color:#dc2626;">Dead Stock Alert (60+ dias sin ventas)</h4>
     <div style="background:white;border-radius:6px;padding:12px;margin:12px 0;text-align:center;">
       <div style="font-size:${isEmail ? 18 : 24}px;font-weight:700;color:#dc2626;">${deadStockData.length}</div>
       <div style="font-size:${isEmail ? 10 : 12}px;color:#6b7280;">PRODUCTOS ESTANCADOS</div>
@@ -538,28 +530,22 @@ function renderABCSummary(abcData) {
   
   return `
   <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
-    <h4 style="margin:0 0 12px;color:#0369a1;">📊 Análisis ABC (Regla 80/20)</h4>
+    <h4 style="margin:0 0 12px;color:#0369a1;">Analisis ABC (Regla 80/20)</h4>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px;">
       <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
         <div style="font-size:20px;font-weight:700;color:#dc2626;">A</div>
         <div style="font-size:12px;color:#6b7280;">TOP PERFORMERS</div>
         <div><strong>${categories.A.length}</strong> productos</div>
       </div>
-      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
-        <div style="font-size:20px;font-weight:700;color:#6b7280;">C</div>
-        <div style="font-size:12px;color:#6b7280;">COLA LARGA</div>
-        <div><strong>${categories.C.length}</strong> productos</div>
-        <div><strong>${((categories.C.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
-      </div>
     </div>
     
     <div style="background:white;border-radius:6px;padding:12px;">
-      <strong style="color:#dc2626;">🏆 TOP PERFORMERS (Categoria A):</strong>
+      <strong style="color:#dc2626;">TOP PERFORMERS (Categoria A):</strong>
       <div style="margin-top:8px;font-size:11px;line-height:1.4;">
         ${categories.A.slice(0,8).map((p, i) => `
           <div style="margin:2px 0;"><strong>${i+1}.</strong> ${esc(p.productTitle)} - ${money(p.revenue)} (${p.revenuePercent}%)</div>
         `).join('')}
-        ${categories.A.length > 8 ? `<div style="color:#6b7280;margin-top:4px;">... y ${categories.A.length - 8} productos más</div>` : ''}
+        ${categories.A.length > 8 ? `<div style="color:#6b7280;margin-top:4px;">... y ${categories.A.length - 8} productos mas</div>` : ''}
       </div>
     </div>
   </div>`;
@@ -608,14 +594,14 @@ function renderProductsTable(rows, isEmail = false) {
       </tr>`;
   }).join("");
   
-  const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos más</div>` : '';
+  const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos mas</div>` : '';
   
-  return `<h3>📊 Top productos vendidos</h3><table>${head}<tbody>${body}</tbody></table>${moreText}`;
+  return `<h3>Top productos vendidos</h3><table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
 function renderROPTable(rows, isEmail = false) {
   if (!rows.length) {
-    return `<div style="margin:16px 0;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;text-align:center;"><strong style="color:#166534;">✅ Excelente!</strong> Todos los productos tienen stock suficiente.</div>`;
+    return `<div style="margin:16px 0;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;text-align:center;"><strong style="color:#166534;">Excelente!</strong> Todos los productos tienen stock suficiente.</div>`;
   }
   
   const sortedRows = [...rows].sort((a,b) => {
@@ -636,13 +622,13 @@ function renderROPTable(rows, isEmail = false) {
     <th align="left">Variante</th>
     ${!isEmail ? '<th align="left">SKU</th>' : ''}
     <th align="right">Stock</th>
-    <th align="right">Vel/día</th>
-    <th align="right">Días restantes</th>
-    <th align="right">🛒 Cantidad</th>
+    <th align="right">Vel/dia</th>
+    <th align="right">Dias restantes</th>
+    <th align="right">Cantidad</th>
   </tr></thead>`;
   
   const body = displayRows.map(r=>{
-    const urgencyPill = r.urgency === 'critical' ? '<span class="pill-critical">CRÍTICO</span>' :
+    const urgencyPill = r.urgency === 'critical' ? '<span class="pill-critical">CRITICO</span>' :
                         r.urgency === 'high' ? '<span class="pill-high">ALTO</span>' :
                         '<span class="pill-medium">MEDIO</span>';
     
@@ -661,10 +647,10 @@ function renderROPTable(rows, isEmail = false) {
       </tr>`;
   }).join("");
   
-  const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos más para reordenar</div>` : '';
+  const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos mas para reordenar</div>` : '';
   
-  return `<h3>🔄 Productos para reordenar</h3>
-    <div style="color:#6b7280;margin-bottom:12px;">Ventana: 30d • Lead time: 7d • Safety: 3d</div>
+  return `<h3>Productos para reordenar</h3>
+    <div style="color:#6b7280;margin-bottom:12px;">Ventana: 30d - Lead time: 7d - Safety: 3d</div>
     <table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
@@ -693,12 +679,9 @@ function styles(isEmail = false) {
     .row-critical{background-color:#fdf2f8 !important}
     .row-critical td{border-color:#f9a8d4 !important}
     
-    .pill{display:inline-block;padding:${isEmail?3:4}px 8px;border-radius:12px;color:#fff;font-weight:600;font-size:${isEmail?10:11}px;text-align:center;min-width:24px}
-    .pill-zero{background:#dc2626}
-    .pill-one{background:#f97316}
-    .pill-critical{background:#ec4899}
-    .pill-high{background:#eab308}
-    .pill-medium{background:#059669}
+    .pill-critical{background:#ec4899;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
+    .pill-high{background:#eab308;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
+    .pill-medium{background:#059669;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
     
     ${isEmail ? '' : `
     @media (max-width: 768px) {
@@ -710,7 +693,7 @@ function styles(isEmail = false) {
   </style>`;
 }
 
-// MAIN HANDLER - con opzione per inventory globale
+// MAIN HANDLER
 export default async function handler(req, res) {
   const startTime = Date.now();
   const timing = {};
@@ -721,15 +704,12 @@ export default async function handler(req, res) {
     const email = req.query.email === "1";
     const preview = req.query.preview === "1";
     const debug = req.query.debug === "1";
-    
-    // OPZIONE per includere location inattive (per il tuo piano futuro)
     const includeAllLocations = req.query.include_all_locations === "1";
 
     const { tz, now, start, end } = await computeRange(period, today);
     const cacheKey = getCacheKey(period, today, start, end) + (includeAllLocations ? '-all' : '');
     const cacheTTL = getCacheTTL(period, today);
     
-    // CHECK CACHE
     if (!debug) {
       const cached = getFromCache(cacheKey, cacheTTL);
       if (cached) {
@@ -745,21 +725,16 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log(`🚀 Processing ${period} - TTL: ${Math.floor(cacheTTL/1000/60)}min${includeAllLocations ? ' - INCLUDING ALL LOCATIONS' : ''}`);
+    console.log(`Processing ${period} - TTL: ${Math.floor(cacheTTL/1000/60)}min${includeAllLocations ? ' - INCLUDING ALL LOCATIONS' : ''}`);
 
-    // FETCH DATA
     const t1 = Date.now();
     const orders = await fetchOrdersPaidInRange(start, end);
     timing.orders = Date.now() - t1;
 
-    // PROCESSAMENTO con opzione location
     const { rows, variantIds } = await processProductsComplete(orders, includeAllLocations);
     const conversions = calculateConversions(orders);
-    
-    // Dead Stock
     const deadStockData = await detectDeadStock(variantIds, now);
     
-    // ROP Analysis
     const start30 = now.minus({days:30}).startOf("day");
     const orders30 = await fetchOrdersPaidInRange(start30, now.endOf("day"));
     
@@ -798,10 +773,8 @@ export default async function handler(req, res) {
       return (urgencyOrder[a.urgency] || 3) - (urgencyOrder[b.urgency] || 3) || b.sales30d - a.sales30d;
     });
 
-    // ABC Analysis
     const abcData = computeABCAnalysis(rows);
     
-    // Comparison
     let comparison = null;
     if (period !== 'monthly') {
       try {
@@ -823,13 +796,13 @@ export default async function handler(req, res) {
     timing.total = Date.now() - startTime;
 
     const label = period==="daily" ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}` :
-                  period==="weekly" ? `Semana ${start.toFormat("dd LLL")} — ${end.toFormat("dd LLL yyyy")}` :
+                  period==="weekly" ? `Semana ${start.toFormat("dd LLL")} - ${end.toFormat("dd LLL yyyy")}` :
                   `${start.toFormat("LLLL yyyy")}`;
 
     const reportData = {
       success: true,
       label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData,
-      includeAllLocations, // Flag per sapere che modalità è usata
+      includeAllLocations,
       stats: {
         totalProducts: rows.length,
         totalRevenue: rows.reduce((s,r)=>s+r.revenue,0),
@@ -843,7 +816,7 @@ export default async function handler(req, res) {
 
     if (email && !preview) {
       const emailTemplate = {
-        subject: `📊 Reporte ventas ${period} - ${label} - ${orders.length} órdenes, ${money(reportData.stats.totalRevenue)}`,
+        subject: `Reporte ventas ${period} - ${label} - ${orders.length} ordenes, ${money(reportData.stats.totalRevenue)}`,
         html: buildCompleteHTML(reportData, true),
         text: `Reporte ventas ${period} - ${label}\nVer online: ${process.env.VERCEL_URL}/api/sales-report?period=${period}`
       };
@@ -864,21 +837,18 @@ export default async function handler(req, res) {
     res.status(200).send(html);
     
   } catch (err) {
-    console.error("⛔ Report error:", err);
+    console.error("Report error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
 function buildCompleteHTML(data, isEmail = false) {
   const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, includeAllLocations } = data;
-  const totQty = rows.reduce((s,r)=>s+r.soldQty,0);
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
 
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
-  
-  // Indica se è modalità globale
-  const inventoryNote = includeAllLocations ? ' (📍 Inventario GLOBAL - todas las locations)' : ' (📍 Solo locations activas)';
+  const inventoryNote = includeAllLocations ? ' (Inventario GLOBAL - todas las locations)' : ' (Solo locations activas)';
 
   return `<!doctype html>
 <html lang="es">
@@ -891,39 +861,39 @@ function buildCompleteHTML(data, isEmail = false) {
 <body>
   <div class="container">
     <header style="text-align:center;${headerStyle}">
-      <h1 style="margin:0;${isEmailMode?'color:white;':''}">📈 Reporte de Ventas</h1>
+      <h1 style="margin:0;${isEmailMode?'color:white;':''}">Reporte de Ventas</h1>
       <h2 style="margin:8px 0;${isEmailMode?'color:#dbeafe;':'color:#4b5563;'}">${esc(label)}${inventoryNote}</h2>
       <div class="muted" style="${isEmailMode?'color:#bfdbfe;':''}">
         Generado: ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
-        ${comparison ? ` • vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? '↗️' : '↘️'} ${Math.abs(comparison.revPercent)}%</strong>` : ''}
+        ${comparison ? ` - vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? 'up' : 'down'} ${Math.abs(comparison.revPercent)}%</strong>` : ''}
       </div>
     </header>
 
     <div class="stats-grid">
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">📦</div>
+        <div style="font-size:20px;margin-bottom:4px;">Productos</div>
         <div class="stat-number">${rows.length}</div>
-        <div class="stat-label">Productos únicos</div>
+        <div class="stat-label">Productos unicos</div>
       </div>
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">🛍️</div>
+        <div style="font-size:20px;margin-bottom:4px;">Ordenes</div>
         <div class="stat-number">${orders.length}</div>
-        <div class="stat-label">Órdenes procesadas</div>
+        <div class="stat-label">Ordenes procesadas</div>
       </div>
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">💰</div>
+        <div style="font-size:20px;margin-bottom:4px;">Ingresos</div>
         <div class="stat-number">${money(totRev)}</div>
         <div class="stat-label">Total vendite</div>
       </div>
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">📊</div>
+        <div style="font-size:20px;margin-bottom:4px;">Ticket</div>
         <div class="stat-number">${money(totRev/orders.length || 0)}</div>
         <div class="stat-label">Ticket promedio</div>
       </div>
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">⚠️</div>
+        <div style="font-size:20px;margin-bottom:4px;">Stock</div>
         <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
-        <div class="stat-label">Stock crítico</div>
+        <div class="stat-label">Stock critico</div>
       </div>
     </div>
 
@@ -937,7 +907,7 @@ function buildCompleteHTML(data, isEmail = false) {
     <footer style="margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
       <div class="muted">
         <div style="margin-bottom:8px;">
-          <strong>📗 Navigation:</strong>
+          <strong>Navigation:</strong>
           <a href="?period=daily&today=1" style="color:#2563eb;">Hoy</a> |
           <a href="?period=daily" style="color:#2563eb;">Ayer</a> |
           <a href="?period=weekly" style="color:#2563eb;">Semana</a> |
@@ -945,7 +915,7 @@ function buildCompleteHTML(data, isEmail = false) {
         </div>
         ${!isEmailMode ? `
         <div style="margin-bottom:8px;">
-          <strong>📍 Inventario:</strong>
+          <strong>Inventario:</strong>
           <a href="?period=daily&include_all_locations=0" style="color:#059669;">Solo Activas</a> |
           <a href="?period=daily&include_all_locations=1" style="color:#dc2626;">Todas las Locations</a>
         </div>
@@ -961,10 +931,16 @@ function buildCompleteHTML(data, isEmail = false) {
   </div>
 </body>
 </html>`;
-}</div>
+}>
       </div>
       <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
         <div style="font-size:20px;font-weight:700;color:#f97316;">B</div>
         <div style="font-size:12px;color:#6b7280;">MEDIANOS</div>
         <div><strong>${categories.B.length}</strong> productos</div>
-        <div><strong>${((categories.B.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos
+        <div><strong>${((categories.B.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div>
+      </div>
+      <div style="text-align:center;background:white;padding:12px;border-radius:6px;">
+        <div style="font-size:20px;font-weight:700;color:#6b7280;">C</div>
+        <div style="font-size:12px;color:#6b7280;">COLA LARGA</div>
+        <div><strong>${categories.C.length}</strong> productos</div>
+        <div><strong>${((categories.C.reduce((s,r)=>s+r.revenue,0)/totalRevenue)*100).toFixed(0)}%</strong> ingresos</div
