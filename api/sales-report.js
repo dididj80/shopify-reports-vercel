@@ -184,7 +184,7 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
 }
 
 // ELABORAZIONE PRODOTTI COMPLETA
-async function processProductsComplete(orders, includeInactiveLocations = false) {
+async function processProductsComplete(orders, includeAllLocations) {
   const byVariant = new Map();
   const variantIds = new Set();
   
