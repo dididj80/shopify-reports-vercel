@@ -312,7 +312,7 @@ function calculateConversions(orders) {
 // DEAD STOCK DETECTION
 async function detectDeadStock(variantIds, now) {
   try {
-    const deadStockDays = 60;
+    const deadStockDays = parseInt(process.env.DEAD_STOCK_DAYS) || 90;
     const cutoffDate = now.minus({days: deadStockDays});
     
     const orders60 = await fetchOrdersPaidInRange(cutoffDate.startOf("day"), now.endOf("day"));
@@ -356,7 +356,9 @@ async function detectDeadStock(variantIds, now) {
 }
 
 // ROP CALCULATION
-function computeROP({sales30d, onHand, leadDays=7, safetyDays=3}) {
+function computeROP({sales30d, onHand, leadDays, safetyDays}) {
+  const realLeadDays = leadDays || parseInt(process.env.ROP_LEAD_DAYS) || 7;
+  const realSafetyDays = safetyDays || parseInt(process.env.ROP_SAFETY_DAYS) || 3;
   const dailyVel = Math.max(0, sales30d/30);
   const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
   const target = Math.ceil(dailyVel * (leadDays + safetyDays + 14));
