@@ -522,6 +522,14 @@ function chartsHTML(orders, isEmail = false) {
     }
   }
 
+    // Se non abbiamo location stats, usa il metodo originale
+  if (!Object.keys(chObj).length) {
+    for (const o of orders) {
+      const ch = (o.source_name || "unknown").toLowerCase();
+      chObj[ch] = (chObj[ch]||0) + pieces(o);
+    }
+  }
+
   // 2) Tipo di pago
   // SISTEMA PAGAMENTI MIGLIORATO
   const grpObj = {};
@@ -575,6 +583,28 @@ function chartsHTML(orders, isEmail = false) {
       "Noche (18-24)";
     hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
   }
+
+  // 3. Location breakdown rendering - AGGIUNGI
+function renderLocationBreakdown(locationStats, isEmail = false) {
+  const locations = Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue);
+  
+  if (!locations.length) return '';
+  
+  return `
+  <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:20px 0;">
+    <h4 style="margin:0 0 12px;color:#374151;">Breakdown por Location</h4>
+    <div style="display:grid;grid-template-columns:repeat(${Math.min(locations.length, 3)},1fr);gap:12px;">
+      ${locations.map(([name, stats]) => `
+        <div style="text-align:center;background:white;padding:12px;border-radius:6px;border:1px solid #e5e7eb;">
+          <div style="font-weight:600;color:#374151;font-size:${isEmail ? 11 : 12}px;margin-bottom:4px;">${esc(name)}</div>
+          <div style="font-size:${isEmail ? 14 : 16}px;font-weight:700;color:#2563eb;">${money(stats.revenue)}</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${stats.orders} órdenes</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${stats.items} items</div>
+        </div>
+      `).join('')}
+    </div>
+  </div>`;
+}
 
   // 4) Rangos de ticket
   const ticketObj = {};
