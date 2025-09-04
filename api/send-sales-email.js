@@ -139,14 +139,6 @@ export default async function handler(req, res) {
       // Reply-to opzionale (se vuoi risposte al tuo Gmail)
       reply_to: process.env.REPLY_TO_EMAIL || process.env.FROM_EMAIL,
       
-      attachments: [
-        {
-          filename: `reporte-ventas-${period}-${new Date().toISOString().split('T')[0]}.html`,
-          content: emailHtml,
-          contentType: 'text/html'
-        }
-      ],
-      
       tags: [
         { name: 'type', value: 'sales-report' },
         { name: 'period', value: period },
