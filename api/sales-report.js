@@ -1019,12 +1019,12 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
       </div>
     </div>
 
+    ${renderDeadStockAlert(deadStockData, isEmailMode)}
+    ${renderROPTable(ropRows, isEmailMode)}
+    ${renderProductsTable(rows, isEmailMode)}
+    ${!isEmailMode ? renderABCSummary(abcData) : ''}
     ${renderConversionAnalysis(conversions, isEmailMode)}
     ${chartsHTML(orders, isEmailMode)}
-    ${!isEmailMode ? renderABCSummary(abcData) : ''}
-    ${renderDeadStockAlert(deadStockData, isEmailMode)}
-    ${renderProductsTable(rows, isEmailMode)}
-    ${renderROPTable(ropRows, isEmailMode)}
 
     <footer style="margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
       <div class="muted">
