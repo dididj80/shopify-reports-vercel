@@ -7,7 +7,7 @@
   ],
   "functions": {
     "api/sales-report.js": {
-      "maxDuration": 60
+      "maxDuration": 120
     },
     "api/send-sales-email.js": {
       "maxDuration": 30
