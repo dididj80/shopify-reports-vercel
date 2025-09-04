@@ -573,10 +573,19 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
 
-  if (gws.length === 0 && (o.total_price === "0.00" || o.total_price === 0)) {
-    grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
-    continue; // Salta il resto della logica per questo ordine
-  }
+    if (gws.length === 0) {
+      console.log('Gateway vuoto trovato:', {
+        orderId: o.id,
+        total_price: o.total_price,
+        type_of_total: typeof o.total_price,
+        isZero: (o.total_price === "0.00" || o.total_price === 0)
+      });
+    }
+    
+    if (gws.length === 0 && (Number(o.total_price) === 0)) {
+      grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
+      continue;
+    }
     
     // Analizza i gateway per determinare il tipo di pagamento
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
