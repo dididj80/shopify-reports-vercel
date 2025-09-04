@@ -374,14 +374,18 @@ function computeROP({sales30d, onHand, leadDays, safetyDays}) {
   const realLeadDays = leadDays || parseInt(process.env.ROP_LEAD_DAYS) || 7;
   const realSafetyDays = safetyDays || parseInt(process.env.ROP_SAFETY_DAYS) || 3;
   const dailyVel = Math.max(0, sales30d/30);
-  const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
-  const target = Math.ceil(dailyVel * (leadDays + safetyDays + 14));
+  /*const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
+  const target = Math.ceil(dailyVel * (leadDays + safetyDays + 14));*/
+  const rop = Math.ceil(dailyVel * (realLeadDays + realSafetyDays));
+  const target = Math.ceil(dailyVel * (realLeadDays + realSafetyDays + 14));
   const coverage = dailyVel > 0 ? (onHand / dailyVel) : Infinity;
   const qty = Math.max(0, target - onHand);
   
   let urgency = 'medium';
-  if (coverage <= leadDays) urgency = 'critical';
-  else if (coverage <= (leadDays + safetyDays)) urgency = 'high';
+  /*if (coverage <= leadDays) urgency = 'critical';
+  else if (coverage <= (leadDays + safetyDays)) urgency = 'high';*/
+  if (coverage <= realLeadDays) urgency = 'critical';
+    else if (coverage <= (realLeadDays + realSafetyDays)) urgency = 'high';
   
   return { 
     dailyVel: dailyVel.toFixed(2), 
@@ -502,6 +506,7 @@ function donutSVG(parts, size = 140) {
 
 // 4. FIX HORARIOS - usa timezone corretto
 function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
+  const locStats = locationStatsParam || {};  // <--- FALBACK!
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
 
@@ -585,28 +590,6 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
   }
 
-  // 3. Location breakdown rendering - AGGIUNGI
-function renderLocationBreakdown(locationStats, isEmail = false) {
-  const locations = Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue);
-  
-  if (!locations.length) return '';
-  
-  return `
-  <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:20px 0;">
-    <h4 style="margin:0 0 12px;color:#374151;">Breakdown por Location</h4>
-    <div style="display:grid;grid-template-columns:repeat(${Math.min(locations.length, 3)},1fr);gap:12px;">
-      ${locations.map(([name, stats]) => `
-        <div style="text-align:center;background:white;padding:12px;border-radius:6px;border:1px solid #e5e7eb;">
-          <div style="font-weight:600;color:#374151;font-size:${isEmail ? 11 : 12}px;margin-bottom:4px;">${esc(name)}</div>
-          <div style="font-size:${isEmail ? 14 : 16}px;font-weight:700;color:#2563eb;">${money(stats.revenue)}</div>
-          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${stats.orders} órdenes</div>
-          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${stats.items} items</div>
-        </div>
-      `).join('')}
-    </div>
-  </div>`;
-}
-
   // 4) Rangos de ticket
   const ticketObj = {};
   for (const o of orders) {
@@ -674,6 +657,28 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
         </div>
       </div>
     `).join("")}
+  </div>`;
+}
+
+  // 3. Location breakdown rendering - AGGIUNGI
+function renderLocationBreakdown(locationStats, isEmail = false) {
+  const locations = Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue);
+  
+  if (!locations.length) return '';
+  
+  return `
+  <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:20px 0;">
+    <h4 style="margin:0 0 12px;color:#374151;">Breakdown por Location</h4>
+    <div style="display:grid;grid-template-columns:repeat(${Math.min(locations.length, 3)},1fr);gap:12px;">
+      ${locations.map(([name, stats]) => `
+        <div style="text-align:center;background:white;padding:12px;border-radius:6px;border:1px solid #e5e7eb;">
+          <div style="font-weight:600;color:#374151;font-size:${isEmail ? 11 : 12}px;margin-bottom:4px;">${esc(name)}</div>
+          <div style="font-size:${isEmail ? 14 : 16}px;font-weight:700;color:#2563eb;">${money(stats.revenue)}</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${stats.orders} órdenes</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${stats.items} items</div>
+        </div>
+      `).join('')}
+    </div>
   </div>`;
 }
 
@@ -1141,7 +1146,7 @@ export default async function handler(req, res) {
 }
 
 function buildCompleteHTML(data, isEmail = false) {
-  const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, includeAllLocations } = data;
+  const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, includeAllLocations, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
 
   const isEmailMode = isEmail;
