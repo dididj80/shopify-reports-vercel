@@ -1042,6 +1042,7 @@ function styles(isEmail = false) {
 
 // MAIN HANDLER con opzione per inventory globale
 export default async function handler(req, res) {
+  console.log("=== SALES REPORT HANDLER AVVIATO ===", new Date().toISOString(), "debug:", req.query.debug);
   const startTime = Date.now();
   const timing = {};
   
