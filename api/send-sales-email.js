@@ -1,7 +1,13 @@
-// /api/send-sales-email.js - RESEND implementation - FIXED
-import { Resend } from 'resend';
+// /api/send-sales-email.js — MAILGUN implementation
+import FormData from 'form-data';
+import Mailgun from 'mailgun.js';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const mg = new Mailgun(FormData);
+const mailgunClient = mg.client({
+  username: 'api',
+  key: process.env.MAILGUN_API_KEY,
+  url: process.env.MAILGUN_BASE_URL || 'https://api.mailgun.net'
+});
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -9,59 +15,49 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { 
-      period = 'daily', 
-      recipients = [], 
+    const {
+      period = 'daily',
+      recipients = [],
       today = false,
       customMessage = '',
       testMode = false
     } = req.body;
 
     // Validazioni
-    if (!process.env.RESEND_API_KEY) {
-      throw new Error('RESEND_API_KEY non configurata');
-    }
+    if (!process.env.MAILGUN_API_KEY) throw new Error('MAILGUN_API_KEY non configurata');
+    if (!process.env.MAILGUN_DOMAIN) throw new Error('MAILGUN_DOMAIN non configurato');
+    if (!recipients.length) return res.status(400).json({ error: 'Recipients richiesti nel body' });
 
-    if (!recipients.length) {
-      return res.status(400).json({ error: 'Recipients richiesti nel body' });
-    }
-
-    console.log(`📧 Inviando report ${period} a ${recipients.length} destinatari`);
+    console.log(`📧 Inviando report ${period} a ${recipients.length} destinatari (Mailgun)`);
 
     // 1) Genera report JSON - ROBUST URL CONSTRUCTION
     let baseUrl;
-    
-    // Debug logging
     console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
     console.log('DEBUG - req.headers.host:', req.headers.host);
-    
+
     if (process.env.VERCEL_URL) {
-      // VERCEL_URL può essere solo il dominio, aggiungiamo https://
-      baseUrl = process.env.VERCEL_URL.startsWith('http') 
-        ? process.env.VERCEL_URL 
+      baseUrl = process.env.VERCEL_URL.startsWith('http')
+        ? process.env.VERCEL_URL
         : `https://${process.env.VERCEL_URL}`;
     } else if (req.headers.host) {
-      // Fallback usando req.headers.host
       const protocol = req.headers['x-forwarded-proto'] || 'https';
       baseUrl = `${protocol}://${req.headers.host}`;
     } else {
-      // Ultimo fallback per cron jobs
       baseUrl = 'https://shopify-reports-vercel.vercel.app';
     }
-    
+
     console.log('DEBUG - Final baseUrl:', baseUrl);
 
     const reportUrl = `${baseUrl}/api/sales-report`;
-    const params = new URLSearchParams({ 
-      period, 
+    const params = new URLSearchParams({
+      period,
       email: '1',
       ...(today && { today: '1' })
     });
 
     console.log(`🔍 Fetching report: ${reportUrl}?${params}`);
-
     const reportResponse = await fetch(`${reportUrl}?${params}`, {
-      headers: { 'User-Agent': 'Resend-Mailer/1.0' }
+      headers: { 'User-Agent': 'Mailgun-Mailer/1.0' }
     });
 
     if (!reportResponse.ok) {
@@ -70,16 +66,16 @@ export default async function handler(req, res) {
     }
 
     const reportData = await reportResponse.json();
-    
-    if (!reportData.success) {
-      throw new Error(reportData.error || 'Report data error');
-    }
+    if (!reportData.success) throw new Error(reportData.error || 'Report data error');
 
     // 2) Prepara subject con stats
-    const money = (n) => new Intl.NumberFormat("es-MX",{style:"currency",currency:"MXN"}).format(Number(n||0));
+    const money = (n) =>
+      new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(Number(n || 0));
     const { stats } = reportData;
-    const subjectLine = `${reportData.email.subject} - ${stats.totalOrders} órdenes, ${money(stats.totalRevenue)}`;
-    
+    const subjectLine = `${reportData.email.subject} - ${stats.totalOrders} órdenes, ${money(
+      stats.totalRevenue
+    )}`;
+
     // 3) Aggiungi messaggio custom se presente
     let emailHtml = reportData.email.html;
     if (customMessage) {
@@ -92,7 +88,7 @@ export default async function handler(req, res) {
       );
     }
 
-    // 4) Aggiungi debug links al footer email
+    // 4) Debug links
     const debugLinks = `
       <div style="background:#f8fafc;border:1px solid #e5e7eb;padding:10px;margin:12px 0;border-radius:6px;">
         <div style="font-weight:600;margin-bottom:6px;color:#374151;font-size:11px;">🔗 Links útiles:</div>
@@ -107,110 +103,58 @@ export default async function handler(req, res) {
         </div>
       </div>
     `;
-
-    // Inserisci debug links prima del footer
     emailHtml = emailHtml.replace(
       /<footer|<div style="background:#f8fafc;padding:16px;text-align:center;border-top:1px solid #e5e7eb;">/,
       `${debugLinks}$&`
     );
 
-    // 5) INVIO con RESEND - ENHANCED DEBUGGING
-    // TEMP FIX: Force use of resend domain until custom domain is verified
-    const fromEmail = 'onboarding@resend.dev'; // process.env.FROM_EMAIL || 'onboarding@resend.dev';
-    
-    console.log('🔍 DEBUG Email config:');
-    console.log('- RESEND_API_KEY exists:', !!process.env.RESEND_API_KEY);
-    console.log('- RESEND_API_KEY length:', process.env.RESEND_API_KEY?.length || 0);
-    console.log('- FROM_EMAIL:', process.env.FROM_EMAIL || 'not set');
-    console.log('- Recipients count:', testMode ? 1 : recipients.length);
-    console.log('- Recipients:', testMode ? [recipients[0]] : recipients);
-    
-    if (fromEmail === 'onboarding@resend.dev') {
-      console.log('⚠️  Usando dominio temporaneo Resend. Per produzione, configura un dominio proprio.');
-    }
+    // 5) INVIO con MAILGUN
+    const fromEmail = process.env.MAILGUN_FROM || `postmaster@${process.env.MAILGUN_DOMAIN}`;
+    const isSandbox = /sandbox\.mailgun\.org$/.test(process.env.MAILGUN_DOMAIN);
+    const finalRecipients = isSandbox ? [recipients[0]] : (testMode ? [recipients[0]] : recipients);
 
-    const emailPayload = {
-      from: fromEmail.includes('@') ? fromEmail : `Sales Report <${fromEmail}>`,
-      to: testMode ? [recipients[0]] : recipients,
+    const msg = await mailgunClient.messages.create(process.env.MAILGUN_DOMAIN, {
+      from: fromEmail,
+      to: finalRecipients,
       subject: subjectLine,
       html: emailHtml,
       text: reportData.email.text,
-      
-      // Reply-to opzionale (se vuoi risposte al tuo Gmail)
-      reply_to: process.env.REPLY_TO_EMAIL || process.env.FROM_EMAIL,
-      
-      tags: [
-        { name: 'type', value: 'sales-report' },
-        { name: 'period', value: period },
-        { name: 'domain', value: fromEmail.includes('resend.dev') ? 'trial' : 'custom' }
-      ]
-    };
-    
-    console.log('🚀 Sending email with payload structure:', JSON.stringify({
-      from: emailPayload.from,
-      to: emailPayload.to,
-      subject: emailPayload.subject,
-      hasHtml: !!emailPayload.html,
-      hasText: !!emailPayload.text,
-      tagsCount: emailPayload.tags ? emailPayload.tags.length : 0
-    }, null, 2));
+      'h:Reply-To': process.env.REPLY_TO_EMAIL || undefined,
+      'o:tag': ['sales-report', period],
+      attachment: {
+        data: Buffer.from(emailHtml, 'utf-8'),
+        filename: `reporte-ventas-${period}-${new Date().toISOString().split('T')[0]}.html`
+      }
+    });
 
-    const emailResult = await resend.emails.send(emailPayload);
-    
-    console.log('📧 Resend response:', JSON.stringify(emailResult, null, 2));
-    
-    if (!emailResult) {
-      throw new Error('Resend returned null/undefined response');
-    }
-    
-    if (!emailResult.id) {
-      throw new Error(`Resend response missing ID: ${JSON.stringify(emailResult)}`);
-    }
-    
-    console.log(`✅ Email inviata via Resend - ID: ${emailResult.id}`);
+    console.log('📧 Mailgun response:', msg);
+    if (!msg?.id) throw new Error(`Mailgun response senza ID valido: ${JSON.stringify(msg)}`);
 
-    // 6) Log per tracking (opzionale)
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      period,
-      recipients: testMode ? 1 : recipients.length,
-      resendId: emailResult.id,
-      stats,
-      testMode,
-      performance: reportData.timing?.total || 'unknown'
-    };
-
-    console.log('📊 Email sent log:', JSON.stringify(logEntry));
-
+    // 6) Response
     return res.status(200).json({
       success: true,
-      messageId: emailResult.id,
-      recipients: testMode ? 1 : recipients.length,
+      messageId: msg.id,
+      recipients: finalRecipients.length,
       stats,
       sentAt: new Date().toISOString(),
-      provider: 'resend',
+      provider: 'mailgun',
       testMode,
-      analyticsUrl: `https://resend.com/emails/${emailResult.id}`,
       webVersion: `${baseUrl}/api/sales-report?period=${period}${today ? '&today=1' : ''}`
     });
 
   } catch (err) {
-    console.error('❌ Resend email error:', err);
-    console.error('❌ Error stack:', err.stack);
-    
-    const errorDetail = {
+    console.error('❌ Mailgun email error:', err);
+    return res.status(500).json({
       success: false,
       error: err.message,
       timestamp: new Date().toISOString(),
-      provider: 'resend',
+      provider: 'mailgun',
       config: {
-        hasApiKey: !!process.env.RESEND_API_KEY,
-        apiKeyLength: process.env.RESEND_API_KEY?.length || 0,
-        hasFromEmail: !!process.env.FROM_EMAIL,
-        fromEmail: process.env.FROM_EMAIL ? 'configured' : 'missing'
+        hasApiKey: !!process.env.MAILGUN_API_KEY,
+        hasDomain: !!process.env.MAILGUN_DOMAIN,
+        baseUrl: process.env.MAILGUN_BASE_URL || 'https://api.mailgun.net',
+        fromEmail: process.env.MAILGUN_FROM || (process.env.MAILGUN_DOMAIN ? `postmaster@${process.env.MAILGUN_DOMAIN}` : 'n/a')
       }
-    };
-
-    return res.status(500).json(errorDetail);
+    });
   }
 }
