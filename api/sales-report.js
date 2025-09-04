@@ -536,6 +536,8 @@ function donutSVG(parts, size = 140) {
 }*/
 
 // 4. FIX HORARIOS - usa timezone corretto
+// Sostituisci TUTTA la funzione chartsHTML (dalle linee 497 alle 709) con questa versione corretta:
+
 function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   console.log(`=== CHARTHTML: Processing ${orders.length} orders ===`);
   
@@ -653,7 +655,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
   ];
 
-  // Resto del rendering HTML...
+  // Rendering HTML
   if (isEmail) {
     const chartSize = 100;
     return `
@@ -703,90 +705,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   </div>`;
 }
 
-  // 3) Franjas horarias - FIX TIMEZONE
-  const hourObj = {};
-  for (const o of orders) {
-    // Converti a timezone Monterrey
-    const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
-    const hour = orderDate.hour;
-    
-    const timeSlot = 
-      hour < 6 ? "Madrugada (00-06)" :
-      hour < 12 ? "Manana (06-12)" :
-      hour < 18 ? "Tarde (12-18)" :
-      "Noche (18-24)";
-    hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
-  }
-
-  // 4) Rangos de ticket
-  const ticketObj = {};
-  for (const o of orders) {
-    const total = revenue(o);
-    const range = 
-      total < 500 ? "Bajo (<$500)" :
-      total < 1500 ? "Medio ($500-1500)" :
-      total < 3000 ? "Alto ($1500-3000)" :
-      "Premium (>$3000)";
-    ticketObj[range] = (ticketObj[range]||0) + 1;
-  }
-
-  const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
-
-  const sections = [
-    { title:"Canales de venta", parts: top(chObj) },
-    { title:"Tipo de pago", parts: top(grpObj) },
-    { title:"Horarios de venta", parts: Object.entries(hourObj).map(([k,v])=>({label:k,value:v})) },
-    { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
-  ];
-
- if (isEmail) {
-    const chartSize = 100;
-    return `
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:20px 0;" class="charts-container">
-      ${sections.map(sec => `
-        <div style="background:#ffffff;border-radius:8px;padding:16px;border:1px solid #e5e7eb;">
-          <h4 style="margin:0 0 12px;color:#374151;font-size:13px;font-weight:600;">${sec.title}</h4>
-          <div style="text-align:center;">
-            ${donutSVG(sec.parts, chartSize)}
-          </div>
-          <div style="margin-top:12px;font-size:10px;">
-            ${sec.parts.slice(0, 4).map((p,i)=>`
-              <div style="display:flex;align-items:center;margin:2px 0;">
-                <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
-                <span style="flex:1;">${esc(p.label)}</span>
-                <span style="font-weight:600;">${p.value}</span>
-              </div>
-            `).join("")}
-          </div>
-        </div>
-      `).join("")}
-    </div>`;
-  }
-  
-  const chartSize = isEmail ? 100 : 140;
-  const gridCols = isEmail ? "repeat(2, 1fr)" : "repeat(auto-fit, minmax(280px, 1fr))";
-
-  return `
-  <div style="display:grid;grid-template-columns:${gridCols};gap:${isEmail ? 16 : 24}px;margin:20px 0;" class="charts-container">
-    ${sections.map(sec => `
-      <div style="background:${isEmail ? '#ffffff' : '#fafafa'};border-radius:8px;padding:16px;border:1px solid #e5e7eb;">
-        <h4 style="margin:0 0 12px;color:#374151;font-size:${isEmail ? 13 : 14}px;font-weight:600;">${sec.title}</h4>
-        <div style="text-align:center;">
-          ${donutSVG(sec.parts, chartSize)}
-        </div>
-        <div style="margin-top:12px;font-size:${isEmail ? 10 : 11}px;">
-          ${sec.parts.slice(0, isEmail ? 4 : 8).map((p,i)=>`
-            <div style="display:flex;align-items:center;margin:${isEmail ? 2 : 4}px 0;">
-              <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
-              <span style="flex:1;">${esc(p.label)}</span>
-              <span style="font-weight:600;">${p.value}</span>
-            </div>
-          `).join("")}
-        </div>
-      </div>
-    `).join("")}
-  </div>`;
-}
+// La prossima funzione dovrebbe essere renderLocationBreakdown che inizia alla linea ~710
 
   // 3. Location breakdown rendering - AGGIUNGI
 function renderLocationBreakdown(locationStats, isEmail = false) {
