@@ -537,16 +537,11 @@ function donutSVG(parts, size = 140) {
 
 // 4. FIX HORARIOS - usa timezone corretto
 function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
-  const locStats = locationStatsParam || {};  // <--- FALBACK!
+  console.log(`=== CHARTHTML: Processing ${orders.length} orders ===`);
+  
+  const locStats = locationStatsParam || {};
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
-
-  // 1) Canali di vendita
-  /*const chObj = {};
-  for (const o of orders) {
-    const ch = (o.source_name || "unknown").toLowerCase();
-    chObj[ch] = (chObj[ch]||0) + pieces(o);
-  }*/
 
   // 1) Canali di vendita CON DETTAGLI LOCATION
   const chObj = {};
@@ -560,46 +555,33 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     }
   } else {
     // fallback: calcolo per canale direttamente dagli ordini
-    const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
     for (const o of orders) {
       const ch = (o.source_name || "unknown").toLowerCase();
       chObj[ch] = (chObj[ch]||0) + pieces(o);
     }
   }
 
-  // 2) Tipo di pago
-  // SISTEMA PAGAMENTI MIGLIORATO
+  // 2) Tipo di pago - CON LOGGING E FIX USO INTERNO
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
-
-    if (gws.length === 0) {
-      console.log('Gateway vuoto trovato:', {
-        orderId: o.id,
-        total_price: o.total_price,
-        type_of_total: typeof o.total_price,
-        isZero: (o.total_price === "0.00" || o.total_price === 0)
-      });
-    }
-
-      const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
-  
-      console.log(`Ordine ${o.id} del ${orderDate.toFormat('dd/MM')}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}]`);
-  
-      if (gws.length === 0) {
-        console.log(`>>> GATEWAY VUOTO: ordine ${o.id}, total=${o.total_price}, isZero=${o.total_price === "0.00" || o.total_price === 0}`);
-      }
-    }
-
- // Log per tutti gli ordini
-  console.log(`Ordine ${o.id}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}], customer=${o.customer?.first_name || 'N/A'}`);
-  
-  
+    const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
+    
+    // Log per tutti gli ordini
+    console.log(`Ordine ${o.id} del ${orderDate.toFormat('dd/MM')}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}], customer=${o.customer?.first_name || 'N/A'}`);
+    
+    // PRIMO CONTROLLO: Uso Interno (gateway vuoto E totale 0)
     if (gws.length === 0 && (Number(o.total_price) === 0)) {
+      console.log(`>>> USO INTERNO TROVATO: ordine ${o.id}, total=${o.total_price}`);
       grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
-      continue;
+      continue; // Salta il resto della logica per questo ordine
     }
-  
+    
+    // Log per gateway vuoti che NON sono uso interno
+    if (gws.length === 0) {
+      console.log(`>>> GATEWAY VUOTO ma NON uso interno: ordine ${o.id}, total=${o.total_price}, isZero=${Number(o.total_price) === 0}`);
+    }
+    
     // Analizza i gateway per determinare il tipo di pagamento
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
     const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
@@ -633,6 +615,93 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     
     grpObj[paymentType] = (grpObj[paymentType]||0) + pieces(o);
   }
+
+  // 3) Franjas horarias - FIX TIMEZONE
+  const hourObj = {};
+  for (const o of orders) {
+    const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
+    const hour = orderDate.hour;
+    
+    const timeSlot = 
+      hour < 6 ? "Madrugada (00-06)" :
+      hour < 12 ? "Manana (06-12)" :
+      hour < 18 ? "Tarde (12-18)" :
+      "Noche (18-24)";
+    hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
+  }
+
+  // 4) Rangos de ticket
+  const ticketObj = {};
+  for (const o of orders) {
+    const total = revenue(o);
+    const range = 
+      total < 500 ? "Bajo (<$500)" :
+      total < 1500 ? "Medio ($500-1500)" :
+      total < 3000 ? "Alto ($1500-3000)" :
+      "Premium (>$3000)";
+    ticketObj[range] = (ticketObj[range]||0) + 1;
+  }
+
+  console.log('=== RISULTATI PAGAMENTI ===', grpObj);
+
+  const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
+
+  const sections = [
+    { title:"Canales de venta", parts: top(chObj) },
+    { title:"Tipo de pago", parts: top(grpObj) },
+    { title:"Horarios de venta", parts: Object.entries(hourObj).map(([k,v])=>({label:k,value:v})) },
+    { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
+  ];
+
+  // Resto del rendering HTML...
+  if (isEmail) {
+    const chartSize = 100;
+    return `
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:20px 0;" class="charts-container">
+      ${sections.map(sec => `
+        <div style="background:#ffffff;border-radius:8px;padding:16px;border:1px solid #e5e7eb;">
+          <h4 style="margin:0 0 12px;color:#374151;font-size:13px;font-weight:600;">${sec.title}</h4>
+          <div style="text-align:center;">
+            ${donutSVG(sec.parts, chartSize)}
+          </div>
+          <div style="margin-top:12px;font-size:10px;">
+            ${sec.parts.slice(0, 4).map((p,i)=>`
+              <div style="display:flex;align-items:center;margin:2px 0;">
+                <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
+                <span style="flex:1;">${esc(p.label)}</span>
+                <span style="font-weight:600;">${p.value}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `).join("")}
+    </div>`;
+  }
+  
+  const chartSize = 140;
+  const gridCols = "repeat(auto-fit, minmax(280px, 1fr))";
+
+  return `
+  <div style="display:grid;grid-template-columns:${gridCols};gap:24px;margin:20px 0;" class="charts-container">
+    ${sections.map(sec => `
+      <div style="background:#fafafa;border-radius:8px;padding:16px;border:1px solid #e5e7eb;">
+        <h4 style="margin:0 0 12px;color:#374151;font-size:14px;font-weight:600;">${sec.title}</h4>
+        <div style="text-align:center;">
+          ${donutSVG(sec.parts, chartSize)}
+        </div>
+        <div style="margin-top:12px;font-size:11px;">
+          ${sec.parts.slice(0, 8).map((p,i)=>`
+            <div style="display:flex;align-items:center;margin:4px 0;">
+              <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
+              <span style="flex:1;">${esc(p.label)}</span>
+              <span style="font-weight:600;">${p.value}</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `).join("")}
+  </div>`;
+}
 
   // 3) Franjas horarias - FIX TIMEZONE
   const hourObj = {};
