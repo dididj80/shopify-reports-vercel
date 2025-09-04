@@ -6,8 +6,8 @@ const reportCache = new Map();
 function getCacheTTL(period, today) {
   if (today) return 3 * 60 * 1000;
   if (period === "daily") return 10 * 60 * 1000;
-  if (period === "weekly") return 30 * 60 * 1000;
-  return 60 * 60 * 1000;
+  if (period === "weekly") return 2 * 60 * 60 * 1000; // 2 ore per weekly
+  return 4 * 60 * 60 * 1000; // 4 ore per monthly
 }
 
 function getCacheKey(period, today, start, end) {
