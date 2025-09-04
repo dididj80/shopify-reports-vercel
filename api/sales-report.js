@@ -777,8 +777,6 @@ function buildEmailHTML(data) {
     </div>
 
     ${renderLocationBreakdown(locationStats, true)}
-    // E prima di chiamare chartsHTML, aggiungi:
-    console.log("=== STA PER CHIAMARE chartsHTML ===");
     ${chartsHTML(orders, true, locationStats)}
 
     <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;margin:20px 0;text-align:center;">
@@ -1182,9 +1180,9 @@ export default async function handler(req, res) {
       });
     }
 
-    const html = buildCompleteHTML(reportData, preview);
-    // Aggiungi questo:
     console.log("=== STA PER CHIAMARE buildCompleteHTML ===", orders.length, "orders");
+    const html = buildCompleteHTML(reportData, preview);
+
     res.setHeader("Content-Type", "text/html");
     res.setHeader("X-Cache", "MISS");
     res.setHeader("X-Timing", `${timing.total}ms`);
