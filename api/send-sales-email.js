@@ -152,8 +152,7 @@ export default async function handler(req, res) {
       subject: emailPayload.subject,
       hasHtml: !!emailPayload.html,
       hasText: !!emailPayload.text,
-      attachmentsCount: emailPayload.attachments.length,
-      tagsCount: emailPayload.tags.length
+      tagsCount: emailPayload.tags ? emailPayload.tags.length : 0
     }, null, 2));
 
     const emailResult = await resend.emails.send(emailPayload);
