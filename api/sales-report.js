@@ -501,7 +501,7 @@ function donutSVG(parts, size = 140) {
 }*/
 
 // 4. FIX HORARIOS - usa timezone corretto
-function chartsHTML(orders, isEmail = false) {
+function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
 
@@ -514,16 +514,17 @@ function chartsHTML(orders, isEmail = false) {
 
   // 1) Canali di vendita CON DETTAGLI LOCATION
   const chObj = {};
-  for (const [locationName, stats] of Object.entries(locationStats)) {
-    if (locationName === 'Online') {
-      chObj['Online'] = stats.items;
-    } else {
-      chObj[locationName] = stats.items;
+  if (Object.keys(locStats).length) {
+    for (const [locationName, stats] of Object.entries(locStats)) {
+      if (locationName === 'Online') {
+        chObj['Online'] = stats.items;
+      } else {
+        chObj[locationName] = stats.items;
+      }
     }
-  }
-
-    // Se non abbiamo location stats, usa il metodo originale
-  if (!Object.keys(chObj).length) {
+  } else {
+    // fallback: calcolo per canale direttamente dagli ordini
+    const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
     for (const o of orders) {
       const ch = (o.source_name || "unknown").toLowerCase();
       chObj[ch] = (chObj[ch]||0) + pieces(o);
@@ -1200,7 +1201,7 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
     ${renderProductsTable(rows, isEmailMode)}
     ${!isEmailMode ? renderABCSummary(abcData) : ''}
     ${renderConversionAnalysis(conversions, isEmailMode)}
-    ${chartsHTML(orders, isEmailMode)}
+    ${chartsHTML(orders, isEmailMode, locationStats)}
 
     <footer style="margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
       <div class="muted">
