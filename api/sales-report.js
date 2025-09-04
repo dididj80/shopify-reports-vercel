@@ -741,7 +741,7 @@ function buildEmailHTML(data) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Reporte de Ventas - ${label}</title>
+  <title>Reporte de Ventas  TEST - ${label}</title>
   ${styles(true)}
 </head>
 <body>
