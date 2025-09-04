@@ -348,8 +348,15 @@ async function getLocationBreakdown(orders) {
 
 
 // DEAD STOCK DETECTION
-async function detectDeadStock(variantIds, now) {
+async function detectDeadStock(variantIds, now, period = 'daily') {
   try {
+
+    // Skip dead stock detection for weekly/monthly to avoid rate limits
+    if (period === 'weekly' || period === 'monthly') {
+      console.log('Skipping dead stock detection for', period, 'to avoid rate limits');
+      return [];
+    }
+    
     const deadStockDays = parseInt(process.env.DEAD_STOCK_DAYS) || 90;
     const cutoffDate = now.minus({days: deadStockDays});
     
@@ -1060,7 +1067,7 @@ export default async function handler(req, res) {
     const conversions = calculateConversions(orders);
     const locationStats = await getLocationBreakdown(orders);
     
-    const deadStockData = await detectDeadStock(variantIds, now);
+    const deadStockData = await detectDeadStock(variantIds, now, period);
     
     const start30 = now.minus({days:30}).startOf("day");
     const orders30 = await fetchOrdersPaidInRange(start30, now.endOf("day"));
