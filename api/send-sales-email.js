@@ -55,7 +55,7 @@ export default async function handler(req, res) {
       ...(today && { today: '1' })
     });
 
-    const completeParams = new URLSearchParams({
+    /*const completeParams = new URLSearchParams({
       period,
       ...(today && { today: '1' })
     });
@@ -70,9 +70,42 @@ export default async function handler(req, res) {
       console.log('✅ Complete HTML generated for attachment');
     } else {
       console.log('⚠️ Using email HTML for attachment (complete version failed)');
-    }
+    }*/
 
-    console.log(`🔍 Fetching report: ${reportUrl}?${params}`);
+const reportResponse = await fetch(`${reportUrl}?${params}`, {
+  headers: { 'User-Agent': 'Mailgun-Mailer/1.0' }
+});
+if (!reportResponse.ok) {
+  const errorText = await reportResponse.text();
+  throw new Error(`Report generation failed: ${reportResponse.status} ${errorText}`);
+}
+const reportData = await reportResponse.json();
+if (!reportData.success) throw new Error(reportData.error || 'Report data error');
+
+// ▶️ SOLO ORA calcola l’HTML completo (con fallback alla versione email)
+let completeHtml = reportData.email.html;
+try {
+  const completeParams = new URLSearchParams({
+    period,
+    ...(today && { today: '1' })
+  });
+  console.log('📄 Fetching complete HTML for attachment...');
+  const completeHtmlResponse = await fetch(`${baseUrl}/api/sales-report?${completeParams}`, {
+    headers: { 'User-Agent': 'Complete-HTML-Generator/1.0' }
+  });
+  if (completeHtmlResponse.ok) {
+    completeHtml = await completeHtmlResponse.text();
+    console.log('✅ Complete HTML generated for attachment');
+  } else {
+    console.log('⚠️ Using email HTML for attachment (complete version failed)');
+  }
+} catch (e) {
+  console.log('⚠️ Complete HTML fetch error:', e.message);
+}
+
+    
+
+    /*console.log(`🔍 Fetching report: ${reportUrl}?${params}`);
     const reportResponse = await fetch(`${reportUrl}?${params}`, {
       headers: { 'User-Agent': 'Mailgun-Mailer/1.0' }
     });
@@ -83,7 +116,7 @@ export default async function handler(req, res) {
     }
 
     const reportData = await reportResponse.json();
-    if (!reportData.success) throw new Error(reportData.error || 'Report data error');
+    if (!reportData.success) throw new Error(reportData.error || 'Report data error');*/
 
     // 2) Prepara subject con stats
     const money = (n) =>
