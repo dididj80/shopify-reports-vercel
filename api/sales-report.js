@@ -613,7 +613,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
       paymentType = "Mercado Pago";
     } else {
       console.log(`>>> QUESTO DIVENTA OTRO: ordine ${o.id}, gws=[${gws.join(',')}], total=${o.total_price}`);
-      paymentType = `Otro (${gws.join(', ')})`;
+      paymentType = `Otro test (${gws.join(', ')})`;
     }
     
     grpObj[paymentType] = (grpObj[paymentType]||0) + pieces(o);
