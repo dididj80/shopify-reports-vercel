@@ -1281,6 +1281,7 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
           <a href="?preview=1" style="color:#10b981;">Preview Email</a> |
           <a href="?debug=1" style="color:#8b5cf6;">Debug</a> |
           <a href="/api/debug-inventory" style="color:#dc2626;">Debug Inventory</a>
+          <strong style="color:#dc2626;">v2.0</strong>
         </div>
         ` : ''}
       </div>
