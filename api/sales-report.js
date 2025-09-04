@@ -1232,6 +1232,7 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
       </div>
     </div>
 
+    ${renderLocationBreakdown(locationStats, isEmailMode)}
     ${renderDeadStockAlert(deadStockData, isEmailMode)}
     ${renderROPTable(ropRows, isEmailMode)}
     ${renderProductsTable(rows, isEmailMode)}
