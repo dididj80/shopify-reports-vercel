@@ -581,6 +581,15 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
         isZero: (o.total_price === "0.00" || o.total_price === 0)
       });
     }
+
+      const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
+  
+      console.log(`Ordine ${o.id} del ${orderDate.toFormat('dd/MM')}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}]`);
+  
+      if (gws.length === 0) {
+        console.log(`>>> GATEWAY VUOTO: ordine ${o.id}, total=${o.total_price}, isZero=${o.total_price === "0.00" || o.total_price === 0}`);
+      }
+    }
     
     if (gws.length === 0 && (Number(o.total_price) === 0)) {
       grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
