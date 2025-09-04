@@ -122,7 +122,7 @@ async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
   
-  console.log(`Fetching ${ids.length} variants individually...`);
+ console.log(`Fetching ${ids.length} variants with rate limiting...`);
   
   for (const variantId of ids) {
     try {
@@ -138,10 +138,34 @@ async function fetchVariantsByIds(variantIds) {
           price: variant.price || "0",
           compare_at_price: variant.compare_at_price
         });
+
+        // DELAY per rispettare rate limit
+      await new Promise(resolve => setTimeout(resolve, 500)); // 0.5 sec = 2 calls/sec max
         
       }
     } catch (err) {
-      console.error(`Error fetch variant ${variantId}:`, err.message);
+      if (err.message.includes('429')) {
+        console.log('Rate limit hit, waiting 2 seconds...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Retry the same variant
+        try {
+          const { variant } = await shopFetchJson(REST(`/variants/${variantId}.json`));
+          if (variant) {
+            out.set(String(variant.id), {
+              inventory_item_id: variant.inventory_item_id,
+              inventory_quantity: variant.inventory_quantity,
+              inventory_management: variant.inventory_management || "",
+              sku: variant.sku || "",
+              price: variant.price || "0",
+              compare_at_price: variant.compare_at_price
+            });
+          }
+        } catch (retryErr) {
+          console.error(`Retry failed for variant ${variantId}:`, retryErr.message);
+        }
+      } else {
+        console.error(`Error fetch variant ${variantId}:`, err.message);
+      }
     }
   }
   
