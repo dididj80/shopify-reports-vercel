@@ -55,6 +55,23 @@ export default async function handler(req, res) {
       ...(today && { today: '1' })
     });
 
+    const completeParams = new URLSearchParams({
+      period,
+      ...(today && { today: '1' })
+    });
+    console.log('📄 Fetching complete HTML for attachment...');
+    const completeHtmlResponse = await fetch(`${baseUrl}/api/sales-report?${completeParams}`, {
+      headers: { 'User-Agent': 'Complete-HTML-Generator/1.0' }
+    });
+
+    let completeHtml = reportData.email.html; // fallback alla versione email
+    if (completeHtmlResponse.ok) {
+      completeHtml = await completeHtmlResponse.text();
+      console.log('✅ Complete HTML generated for attachment');
+    } else {
+      console.log('⚠️ Using email HTML for attachment (complete version failed)');
+    }
+
     console.log(`🔍 Fetching report: ${reportUrl}?${params}`);
     const reportResponse = await fetch(`${reportUrl}?${params}`, {
       headers: { 'User-Agent': 'Mailgun-Mailer/1.0' }
@@ -97,9 +114,10 @@ export default async function handler(req, res) {
           <a href="${baseUrl}/api/sales-report?period=daily&today=1" style="color:#2563eb;">Hoy</a> |
           <a href="${baseUrl}/api/sales-report?period=daily" style="color:#2563eb;">Ayer</a> |
           <a href="${baseUrl}/api/sales-report?period=weekly" style="color:#2563eb;">Semana</a><br>
-          <strong>Debug:</strong>
-          <a href="${baseUrl}/api/sales-report?period=${period}&debug=1" style="color:#8b5cf6;">Debug</a> |
-          <a href="${baseUrl}/api/sales-report?period=${period}&today=1&debug=1" style="color:#8b5cf6;">Debug Hoy</a>
+          <strong>Trigger Manual:</strong>
+          <a href="${baseUrl}/api/cron/smart-report?trigger=daily" style="color:#059669;">Diario</a> |
+          <a href="${baseUrl}/api/cron/smart-report?trigger=weekly" style="color:#2563eb;">Semanal</a> |
+          <a href="${baseUrl}/api/cron/smart-report?trigger=monthly" style="color:#8b5cf6;">Mensual</a>
         </div>
       </div>
     `;
@@ -122,8 +140,9 @@ export default async function handler(req, res) {
       'h:Reply-To': process.env.REPLY_TO_EMAIL || undefined,
       'o:tag': ['sales-report', period],
       attachment: {
-        data: Buffer.from(emailHtml, 'utf-8'),
-        filename: `reporte-ventas-${period}-${new Date().toISOString().split('T')[0]}.html`
+        data: Buffer.from(completeHtml, 'utf-8'),
+        filename: `reporte-ventas-complete-${period}-${new Date().toISOString().split('T')[0]}.html`,
+        contentType: 'text/html'
       }
     });
 
