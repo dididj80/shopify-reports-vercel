@@ -573,10 +573,11 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     console.log(`Ordine ${o.id} del ${orderDate.toFormat('dd/MM')}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}], customer=${o.customer?.first_name || 'N/A'}`);
     
     // PRIMO CONTROLLO: Uso Interno (gateway vuoto E totale 0)
-    if (gws.length === 0 && (Number(o.total_price) === 0)) {
+    // PRIMO CONTROLLO: Uso Interno (gateway vuoto indipendentemente dal totale)
+    if (gws.length === 0) {
       console.log(`>>> USO INTERNO TROVATO: ordine ${o.id}, total=${o.total_price}`);
       grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
-      continue; // Salta il resto della logica per questo ordine
+      continue; 
     }
     
     // Log per gateway vuoti che NON sono uso interno
