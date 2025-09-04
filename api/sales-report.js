@@ -584,7 +584,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     
     // Logica di classificazione migliorata
     if (hasCash && hasFiserv) {
-      paymentType = "Mixto (Cash + Terminal)";
+      paymentType = "Mixto (Cash + Fiserv Pos)";
     } else if (hasCash && hasPayPal) {
       paymentType = "Mixto (Cash + PayPal)";
     } else if (hasCash && hasShopifyPayments) {
@@ -594,7 +594,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     } else if (hasPayPal) {
       paymentType = "PayPal";
     } else if (hasFiserv) {
-      paymentType = "Terminal Fiserv";
+      paymentType = "Fiserv Pos";
     } else if (hasShopifyPayments) {
       paymentType = "Tarjeta (Shopify)";
     } else if (hasMercadoPago) {
