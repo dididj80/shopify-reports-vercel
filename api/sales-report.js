@@ -685,11 +685,42 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
   </div>`;
 }
 
-// Template email semplificato
+// Template email ultra-semplificato - solo statistiche testuali
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
   const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
+  
+  // Calcolo dati per sezioni testuali
+  const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
+  const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
+  
+  // Analisi canali di vendita
+  const channelData = {};
+  for (const o of orders) {
+    const ch = (o.source_name || "unknown").toLowerCase();
+    channelData[ch] = (channelData[ch]||0) + pieces(o);
+  }
+  const topChannels = Object.entries(channelData).sort((a,b)=>b[1]-a[1]).slice(0,3);
+  
+  // Analisi pagamenti
+  const paymentData = {};
+  for (const o of orders) {
+    const gws = o.payment_gateway_names || [];
+    if (gws.length === 0) {
+      paymentData["Uso Interno"] = (paymentData["Uso Interno"] || 0) + pieces(o);
+    } else if (gws.some(g => g.toLowerCase().includes("fiserv"))) {
+      paymentData["Fiserv POS"] = (paymentData["Fiserv POS"] || 0) + pieces(o);
+    } else if (gws.some(g => g.toLowerCase().includes("cash"))) {
+      paymentData["Efectivo"] = (paymentData["Efectivo"] || 0) + pieces(o);
+    } else {
+      paymentData["Otros"] = (paymentData["Otros"] || 0) + pieces(o);
+    }
+  }
+  const topPayments = Object.entries(paymentData).sort((a,b)=>b[1]-a[1]).slice(0,3);
+  
+  // Stock crítico
+  const criticalStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length;
   
   return `<!doctype html>
 <html lang="es">
@@ -697,52 +728,109 @@ function buildEmailHTML(data) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reporte de Ventas - ${label}</title>
-  ${styles(true)}
+  <style>
+    body{font-family:Arial,sans-serif;color:#333;margin:0;padding:20px;background:#f5f5f5}
+    .container{max-width:600px;margin:0 auto;background:white;border-radius:8px;overflow:hidden}
+    .header{background:#2563eb;color:white;padding:20px;text-align:center}
+    .content{padding:20px}
+    .stat-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #eee}
+    .stat-label{font-weight:600;color:#666}
+    .stat-value{font-weight:bold;color:#2563eb}
+    .section{margin:20px 0;padding:15px;background:#f8fafc;border-radius:6px}
+    .section h3{margin:0 0 10px;color:#374151;font-size:16px}
+    .alert{background:#fef2f2;border:1px solid #fecaca;padding:15px;border-radius:6px;margin:15px 0}
+    .success{background:#f0fdf4;border:1px solid #bbf7d0;padding:15px;border-radius:6px;margin:15px 0}
+    .footer{background:#f8fafc;padding:15px;text-align:center;font-size:12px;color:#666}
+  </style>
 </head>
 <body>
   <div class="container">
-    <header style="text-align:center;background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;">
-      <h1 style="margin:0;color:white;">Reporte de Ventas</h1>
-      <h2 style="margin:8px 0;color:#dbeafe;">${esc(label)}</h2>
-      <div style="color:#bfdbfe;font-size:12px;">
-        Generado: ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
-      </div>
-    </header>
-
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-number">${rows.length}</div>
-        <div class="stat-label">Productos</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-number">${orders.length}</div>
-        <div class="stat-label">Órdenes</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-number">${money(totRev)}</div>
-        <div class="stat-label">Ingresos</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-number">${money(totRev/orders.length || 0)}</div>
-        <div class="stat-label">Ticket Prom.</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
-        <div class="stat-label">Stock Crítico</div>
+    <div class="header">
+      <h1 style="margin:0;">📊 Reporte de Ventas</h1>
+      <h2 style="margin:5px 0;">${esc(label)}</h2>
+      <div style="font-size:14px;opacity:0.9;">
+        ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
       </div>
     </div>
 
-    ${renderLocationBreakdown(locationStats, true)}
-    ${chartsHTML(orders, true, locationStats)}
+    <div class="content">
+      <!-- ESTADÍSTICAS PRINCIPALES -->
+      <div class="section">
+        <h3>📈 Resumen General</h3>
+        <div class="stat-row">
+          <span class="stat-label">Productos únicos vendidos:</span>
+          <span class="stat-value">${rows.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Total órdenes procesadas:</span>
+          <span class="stat-value">${orders.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Ingresos totales:</span>
+          <span class="stat-value">${money(totRev)}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Ticket promedio:</span>
+          <span class="stat-value">${money(totRev/orders.length || 0)}</span>
+        </div>
+      </div>
 
-    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;margin:20px 0;text-align:center;">
-      <div style="font-weight:600;margin-bottom:8px;">📊 Reporte Completo</div>
-      <div style="margin-bottom:12px;">
-        <a href="${baseUrl}/api/sales-report?period=daily" style="color:#2563eb;text-decoration:none;font-weight:500;">Ver Análisis Completo Online</a>
+      <!-- CANALES DE VENTA -->
+      <div class="section">
+        <h3>🛒 Top Canales de Venta</h3>
+        ${topChannels.map(([channel, items]) => `
+          <div class="stat-row">
+            <span class="stat-label">${channel.charAt(0).toUpperCase() + channel.slice(1)}:</span>
+            <span class="stat-value">${items} items</span>
+          </div>
+        `).join('')}
       </div>
-      <div style="font-size:11px;color:#6b7280;">
-        PDF archivado automáticamente • Performance: ${timing?.total || 0}ms
+
+      <!-- MÉTODOS DE PAGO -->
+      <div class="section">
+        <h3>💳 Métodos de Pago</h3>
+        ${topPayments.map(([method, items]) => `
+          <div class="stat-row">
+            <span class="stat-label">${method}:</span>
+            <span class="stat-value">${items} items</span>
+          </div>
+        `).join('')}
       </div>
+
+      <!-- BREAKDOWN POR LOCATION -->
+      ${Object.keys(locationStats).length > 0 ? `
+      <div class="section">
+        <h3>📍 Ventas por Location</h3>
+        ${Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue).map(([name, stats]) => `
+          <div class="stat-row">
+            <span class="stat-label">${name}:</span>
+            <span class="stat-value">${money(stats.revenue)} (${stats.orders} órdenes)</span>
+          </div>
+        `).join('')}
+      </div>
+      ` : ''}
+
+      <!-- ALERTAS DE STOCK -->
+      ${criticalStock > 0 ? `
+      <div class="alert">
+        <strong>⚠️ Stock Crítico:</strong> ${criticalStock} productos con inventario ≤ 1 unidad
+      </div>
+      ` : `
+      <div class="success">
+        <strong>✅ Stock OK:</strong> Todos los productos tienen inventario suficiente
+      </div>
+      `}
+
+      <!-- LINK AL REPORTE COMPLETO -->
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:15px;margin:20px 0;text-align:center;">
+        <div style="font-weight:600;margin-bottom:8px;">📊 Reporte Completo</div>
+        <a href="${baseUrl}/api/sales-report?period=daily" style="color:#2563eb;text-decoration:none;font-weight:500;">Ver Análisis Detallado Online</a>
+      </div>
+    </div>
+
+    <div class="footer">
+      Generado automáticamente por Sistema de Reportes<br>
+      Performance: ${timing?.total || 0}ms
     </div>
   </div>
 </body>
