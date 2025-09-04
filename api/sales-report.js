@@ -289,6 +289,40 @@ function calculateConversions(orders) {
   }).sort((a,b) => b.orders - a.orders);
 }
 
+// 1. Location breakdown function - AGGIUNGI dopo calculateConversions()
+async function getLocationBreakdown(orders) {
+  const locationStats = {};
+  
+  for (const order of orders) {
+    let locationName = 'Online';
+    
+    if (order.location_id) {
+      try {
+        const { location } = await shopFetchJson(REST(`/locations/${order.location_id}.json`));
+        locationName = location.name || `Location ${order.location_id}`;
+      } catch (err) {
+        locationName = `Location ${order.location_id}`;
+      }
+    } else if (order.source_name && order.source_name.toLowerCase().includes('pos')) {
+      locationName = 'POS (Location Unknown)';
+    }
+
+    if (!locationStats[locationName]) {
+      locationStats[locationName] = { orders: 0, revenue: 0, items: 0 };
+    }
+
+    const revenue = order.line_items.reduce((s,li) => s + (Number(li.price||0) * Number(li.quantity||0)), 0);
+    const items = order.line_items.reduce((s,li) => s + Number(li.quantity||0), 0);
+
+    locationStats[locationName].orders++;
+    locationStats[locationName].revenue += revenue;
+    locationStats[locationName].items += items;
+  }
+
+  return locationStats;
+}
+
+
 // DEAD STOCK DETECTION
 async function detectDeadStock(variantIds, now) {
   try {
@@ -384,7 +418,7 @@ function computeABCAnalysis(rows) {
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
 // 3. FIX GRAFICI - gestisce dati singoli
-/*function donutSVG(parts, size=140) {
+function donutSVG(parts, size=140) {
   if (!parts.length || parts.every(p => p.value === 0)) {
     return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:50%;color:#9ca3af;font-size:12px;">Sin datos</div>`;
   }
@@ -415,9 +449,9 @@ const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4
   segs += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#374151" font-weight="600" font-size="14">${totalLabel}</text>`;
   
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
-}*/
+}
 // Función para generar URLs de gráficos estáticos con QuickChart
-function generateChartUrl(chartConfig, width = 140, height = 140) {
+/*function generateChartUrl(chartConfig, width = 140, height = 140) {
   const config = {
     ...chartConfig,
     options: {
@@ -464,7 +498,7 @@ function donutSVG(parts, size = 140) {
   const chartUrl = generateChartUrl(chartConfig, size, size);
   
   return `<img src="${chartUrl}" alt="Chart" style="width:${size}px;height:${size}px;border-radius:8px;" onerror="this.style.display='none';" />`;
-}
+}*/
 
 // 4. FIX HORARIOS - usa timezone corretto
 function chartsHTML(orders, isEmail = false) {
@@ -472,10 +506,20 @@ function chartsHTML(orders, isEmail = false) {
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
 
   // 1) Canali di vendita
-  const chObj = {};
+  /*const chObj = {};
   for (const o of orders) {
     const ch = (o.source_name || "unknown").toLowerCase();
     chObj[ch] = (chObj[ch]||0) + pieces(o);
+  }*/
+
+  // 1) Canali di vendita CON DETTAGLI LOCATION
+  const chObj = {};
+  for (const [locationName, stats] of Object.entries(locationStats)) {
+    if (locationName === 'Online') {
+      chObj['Online'] = stats.items;
+    } else {
+      chObj[locationName] = stats.items;
+    }
   }
 
   // 2) Tipo di pago
@@ -553,6 +597,30 @@ function chartsHTML(orders, isEmail = false) {
     { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
   ];
 
+ if (isEmail) {
+    const chartSize = 100;
+    return `
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:20px 0;" class="charts-container">
+      ${sections.map(sec => `
+        <div style="background:#ffffff;border-radius:8px;padding:16px;border:1px solid #e5e7eb;">
+          <h4 style="margin:0 0 12px;color:#374151;font-size:13px;font-weight:600;">${sec.title}</h4>
+          <div style="text-align:center;">
+            ${donutSVG(sec.parts, chartSize)}
+          </div>
+          <div style="margin-top:12px;font-size:10px;">
+            ${sec.parts.slice(0, 4).map((p,i)=>`
+              <div style="display:flex;align-items:center;margin:2px 0;">
+                <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
+                <span style="flex:1;">${esc(p.label)}</span>
+                <span style="font-weight:600;">${p.value}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `).join("")}
+    </div>`;
+  }
+  
   const chartSize = isEmail ? 100 : 140;
   const gridCols = isEmail ? "repeat(2, 1fr)" : "repeat(auto-fit, minmax(280px, 1fr))";
 
@@ -577,6 +645,83 @@ function chartsHTML(orders, isEmail = false) {
     `).join("")}
   </div>`;
 }
+
+// 5. Email semplificata - AGGIUNGI
+function buildEmailHTML(data) {
+  const { label, tz, now, rows, orders, timing, locationStats } = data;
+  const totRev = rows.reduce((s,r)=>s+r.revenue,0);
+  const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
+  
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reporte de Ventas - ${label}</title>
+  ${styles(true)}
+</head>
+<body>
+  <div class="container">
+    <header style="text-align:center;background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;">
+      <h1 style="margin:0;color:white;">Reporte de Ventas</h1>
+      <h2 style="margin:8px 0;color:#dbeafe;">${esc(label)}</h2>
+      <div style="color:#bfdbfe;font-size:12px;">
+        Generado: ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
+      </div>
+    </header>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-number">${rows.length}</div>
+        <div class="stat-label">Productos</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">${orders.length}</div>
+        <div class="stat-label">Órdenes</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">${money(totRev)}</div>
+        <div class="stat-label">Ingresos</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">${money(totRev/orders.length || 0)}</div>
+        <div class="stat-label">Ticket Prom.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
+        <div class="stat-label">Stock Crítico</div>
+      </div>
+    </div>
+
+    ${renderLocationBreakdown(locationStats, true)}
+    ${chartsHTML(orders, true, locationStats)}
+
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;margin:20px 0;text-align:center;">
+      <div style="font-weight:600;margin-bottom:8px;">📊 Reporte Completo</div>
+      <div style="margin-bottom:12px;">
+        <a href="${baseUrl}/api/sales-report?period=daily" style="color:#2563eb;text-decoration:none;font-weight:500;">Ver Análisis Completo Online</a>
+      </div>
+      <div style="font-size:11px;color:#6b7280;">
+        PDF archivado automáticamente • Performance: ${timing?.total || 0}ms
+      </div>
+    </div>
+
+    <footer style="margin-top:30px;padding-top:16px;border-top:1px solid #e5e7eb;">
+      <div style="font-size:11px;color:#6b7280;text-align:center;">
+        <div style="margin-bottom:8px;"><strong>Trigger Manual:</strong></div>
+        <div>
+          <a href="${baseUrl}/api/cron/smart-report?trigger=daily" style="color:#059669;text-decoration:none;">Diario</a> |
+          <a href="${baseUrl}/api/cron/smart-report?trigger=weekly" style="color:#2563eb;text-decoration:none;">Semanal</a> |
+          <a href="${baseUrl}/api/cron/smart-report?trigger=monthly" style="color:#8b5cf6;text-decoration:none;">Mensual</a>
+        </div>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>`;
+}
+
+
 
 // RENDER FUNCTIONS
 function renderConversionAnalysis(conversionData, isEmail = false) {
@@ -853,6 +998,7 @@ export default async function handler(req, res) {
 
     const { rows, variantIds } = await processProductsComplete(orders, includeAllLocations);
     const conversions = calculateConversions(orders);
+    const locationStats = await getLocationBreakdown(orders);
     
     const deadStockData = await detectDeadStock(variantIds, now);
     
@@ -922,7 +1068,7 @@ export default async function handler(req, res) {
 
     const reportData = {
       success: true,
-      label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData,
+      label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, locationStats, // <-- aggiungi locationStats
       includeAllLocations: includeAllLocations,
       stats: {
         totalProducts: rows.length,
@@ -938,7 +1084,7 @@ export default async function handler(req, res) {
     if (email && !preview) {
       const emailTemplate = {
         subject: `Reporte ventas ${period} - ${label} - ${orders.length} ordenes, ${money(reportData.stats.totalRevenue)}`,
-        html: buildCompleteHTML(reportData, true),
+        html: buildEmailHTML(reportData, true),
         text: `Reporte ventas ${period} - ${label}\nVer online: ${process.env.VERCEL_URL}/api/sales-report?period=${period}`
       };
       
