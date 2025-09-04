@@ -590,12 +590,16 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
         console.log(`>>> GATEWAY VUOTO: ordine ${o.id}, total=${o.total_price}, isZero=${o.total_price === "0.00" || o.total_price === 0}`);
       }
     }
-    
+
+ // Log per tutti gli ordini
+  console.log(`Ordine ${o.id}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}], customer=${o.customer?.first_name || 'N/A'}`);
+  
+  
     if (gws.length === 0 && (Number(o.total_price) === 0)) {
       grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
       continue;
     }
-    
+  
     // Analizza i gateway per determinare il tipo di pagamento
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
     const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
@@ -623,6 +627,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     } else if (hasMercadoPago) {
       paymentType = "Mercado Pago";
     } else {
+      console.log(`>>> QUESTO DIVENTA OTRO: ordine ${o.id}, gws=[${gws.join(',')}], total=${o.total_price}`);
       paymentType = `Otro (${gws.join(', ')})`;
     }
     
