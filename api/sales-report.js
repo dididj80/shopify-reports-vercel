@@ -572,6 +572,11 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
+
+  if (gws.length === 0 && (o.total_price === "0.00" || o.total_price === 0)) {
+    grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
+    continue; // Salta il resto della logica per questo ordine
+  }
     
     // Analizza i gateway per determinare il tipo di pagamento
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
