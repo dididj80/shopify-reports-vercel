@@ -142,7 +142,7 @@ export default async function handler(req, res) {
       attachments: [
         {
           filename: `reporte-ventas-${period}-${new Date().toISOString().split('T')[0]}.html`,
-          content: buildCompleteHTML({...reportData, includeAllLocations}, false), // false = versione completa web
+          content: attachmentHtml,
           contentType: 'text/html'
         }
       ],
