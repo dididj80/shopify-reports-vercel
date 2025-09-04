@@ -1,11 +1,15 @@
-// /api/sales-report.js - Versione COMPLETA con tutte le funzionalità ORIGINALI + inventario migliorato
+// /api/sales-report.js - Sistema completo di reporting vendite per Shopify
+// Genera report dettagliati con analisi ABC, gestione inventario, e grafici interattivi
 import { DateTime } from "luxon";
 
-// CACHE ottimizzata - ORIGINALE
+// ========================================
+// SISTEMA DI CACHE IN-MEMORY
+// ========================================
 const reportCache = new Map();
+
 function getCacheTTL(period, today) {
-  if (today) return 3 * 60 * 1000;
-  if (period === "daily") return 10 * 60 * 1000;
+  if (today) return 3 * 60 * 1000; // 3 minuti per dati tempo reale
+  if (period === "daily") return 10 * 60 * 1000; // 10 minuti per daily
   if (period === "weekly") return 2 * 60 * 60 * 1000; // 2 ore per weekly
   return 4 * 60 * 60 * 1000; // 4 ore per monthly
 }
@@ -34,13 +38,18 @@ function setCache(key, data, ttl) {
   reportCache.set(key, { data, timestamp: Date.now() });
 }
 
-// SHOPIFY API - ORIGINALE
+// ========================================
+// CONFIGURAZIONE SHOPIFY API
+// ========================================
 const SHOP = process.env.SHOPIFY_SHOP;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
+
+// Helper per escape HTML e formattazione
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const money = (n) => new Intl.NumberFormat("es-MX",{style:"currency",currency:"MXN"}).format(Number(n||0));
 
+// Wrapper per chiamate API con gestione errori
 async function fetchWithHeaders(url) {
   const r = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
   const text = await r.text();
@@ -53,10 +62,11 @@ async function shopFetchJson(url) {
   return json; 
 }
 
-// 1. FIX TIMEZONE - forza Monterrey/Mexico
+// ========================================
+// GESTIONE TIMEZONE E DATE
+// ========================================
 async function getShopTZ() {
-  // Forza timezone Monterrey invece di UTC
-  return "America/Monterrey";
+  return "America/Monterrey"; // Timezone forzato per coerenza
 }
 
 async function computeRange(period, todayFlag) {
@@ -84,7 +94,9 @@ async function computeRange(period, todayFlag) {
   return { tz, now, start, end };
 }
 
-// FETCH ORDERS con paginazione
+// ========================================
+// RECUPERO ORDINI DA SHOPIFY
+// ========================================
 async function fetchOrdersPaidInRange(start, end) {
   const base = `/orders.json?status=any&financial_status=paid&limit=250` +
     `&created_at_min=${encodeURIComponent(start.toUTC().toISO())}` +
@@ -94,8 +106,9 @@ async function fetchOrdersPaidInRange(start, end) {
   const out = [];
   let pageCount = 0;
   
+  // Gestione paginazione automatica
   for (;;) {
-    if (pageCount++ > 100) break;
+    if (pageCount++ > 100) break; // Safety limit
     const { json, link } = await fetchWithHeaders(url);
     const orders = json.orders || [];
     out.push(...orders);
@@ -114,19 +127,18 @@ async function fetchOrdersPaidInRange(start, end) {
   }
 }
 
-// CHUNK helper
+// ========================================
+// GESTIONE VARIANTI E INVENTARIO
+// ========================================
 const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i)=>arr.slice(i*n,(i+1)*n));
 
-// FETCH VARIANTS con inventory
+// Recupera info dettagliate delle varianti con rate limiting
 async function fetchVariantsByIds(variantIds) {
   const ids = [...new Set(variantIds.filter(Boolean))];
   const out = new Map();
   
- console.log(`Fetching ${ids.length} variants with rate limiting...`);
-  
   for (const variantId of ids) {
     try {
-      // Usa chiamate individuali come il debug inventory
       const { variant } = await shopFetchJson(REST(`/variants/${variantId}.json`));
       
       if (variant) {
@@ -139,15 +151,13 @@ async function fetchVariantsByIds(variantIds) {
           compare_at_price: variant.compare_at_price
         });
 
-        // DELAY per rispettare rate limit
-      await new Promise(resolve => setTimeout(resolve, 500)); // 0.5 sec = 2 calls/sec max
-        
+        // Rate limiting: max 2 calls/sec
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     } catch (err) {
       if (err.message.includes('429')) {
-        console.log('Rate limit hit, waiting 2 seconds...');
         await new Promise(resolve => setTimeout(resolve, 2000));
-        // Retry the same variant
+        // Retry una volta
         try {
           const { variant } = await shopFetchJson(REST(`/variants/${variantId}.json`));
           if (variant) {
@@ -169,11 +179,10 @@ async function fetchVariantsByIds(variantIds) {
     }
   }
   
-  console.log(`Successfully fetched ${out.size} of ${ids.length} variants`);
   return out;
 }
 
-// FETCH INVENTORY LEVELS MIGLIORATA - Solo location attive per default
+// Recupera livelli di inventario con opzione per includere location inattive
 async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   const ids = [...new Set(itemIds.filter(Boolean).map(String))];
   const res = Object.create(null);
@@ -186,7 +195,7 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
         const key = String(lvl.inventory_item_id);
         const available = Number(lvl.available || 0);
         
-        // VERIFICA SE LOCATION E' ATTIVA (se richiesto)
+        // Filtra per location attive se richiesto
         if (!includeInactive) {
           let location = locationCache.get(lvl.location_id);
           if (!location) {
@@ -200,7 +209,6 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
             }
           }
           
-          // Solo location attive
           if (!location.active) continue;
         }
         
@@ -214,11 +222,14 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   return res;
 }
 
-// ELABORAZIONE PRODOTTI COMPLETA
+// ========================================
+// ELABORAZIONE DATI PRODOTTI
+// ========================================
 async function processProductsComplete(orders, includeAllLocations) {
   const byVariant = new Map();
   const variantIds = new Set();
   
+  // Aggrega dati per variante
   for (const o of orders) {
     for (const li of o.line_items || []) {
       const key = li.variant_id ?? `SKU:${li.sku || li.title}`;
@@ -244,7 +255,7 @@ async function processProductsComplete(orders, includeAllLocations) {
   
   const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
   
-  // FETCH VARIANT INFO
+  // Arricchisce con info varianti
   if (variantIds.size > 0) {
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     
@@ -259,13 +270,9 @@ async function processProductsComplete(orders, includeAllLocations) {
     }
   }
 
-  // FETCH INVENTORY LEVELS con opzione location
+  // Arricchisce con livelli inventario
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
-
-    // Nella funzione processProductsComplete, prima della chiamata fetchInventoryLevelsForItems
-    const debugItemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
-   
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
     for (const r of rows) {
@@ -283,7 +290,9 @@ async function processProductsComplete(orders, includeAllLocations) {
   return { rows, variantIds: [...variantIds] };
 }
 
-// CONVERSIONI per canale
+// ========================================
+// ANALISI CONVERSION RATE
+// ========================================
 function calculateConversions(orders) {
   const channelStats = {};
   
@@ -299,6 +308,7 @@ function calculateConversions(orders) {
   }
   
   return Object.entries(channelStats).map(([channel, stats]) => {
+    // Stima sessioni: POS più conversione alta, online più bassa
     const estimatedSessions = channel === 'pos' ? stats.orders * 2 : stats.orders * 45;
     const conversionRate = ((stats.orders / estimatedSessions) * 100).toFixed(1);
     const aov = stats.orders > 0 ? (stats.revenue / stats.orders) : 0;
@@ -313,13 +323,16 @@ function calculateConversions(orders) {
   }).sort((a,b) => b.orders - a.orders);
 }
 
-// 1. Location breakdown function - AGGIUNGI dopo calculateConversions()
+// ========================================
+// BREAKDOWN PER LOCATION
+// ========================================
 async function getLocationBreakdown(orders) {
   const locationStats = {};
   
   for (const order of orders) {
     let locationName = 'Online';
     
+    // Identifica location da order.location_id
     if (order.location_id) {
       try {
         const { location } = await shopFetchJson(REST(`/locations/${order.location_id}.json`));
@@ -346,20 +359,20 @@ async function getLocationBreakdown(orders) {
   return locationStats;
 }
 
-
-// DEAD STOCK DETECTION
+// ========================================
+// RILEVAMENTO DEAD STOCK
+// ========================================
 async function detectDeadStock(variantIds, now, period = 'daily') {
   try {
-
-    // Skip dead stock detection for weekly/monthly to avoid rate limits
+    // Skip per weekly/monthly per evitare rate limits
     if (period === 'weekly' || period === 'monthly') {
-      console.log('Skipping dead stock detection for', period, 'to avoid rate limits');
       return [];
     }
     
     const deadStockDays = parseInt(process.env.DEAD_STOCK_DAYS) || 90;
     const cutoffDate = now.minus({days: deadStockDays});
     
+    // Trova varianti vendute negli ultimi N giorni
     const orders60 = await fetchOrdersPaidInRange(cutoffDate.startOf("day"), now.endOf("day"));
     
     const soldVariants = new Set();
@@ -369,12 +382,13 @@ async function detectDeadStock(variantIds, now, period = 'daily') {
       }
     }
     
+    // Identifica varianti mai vendute nel periodo
     const deadVariantIds = variantIds.filter(id => !soldVariants.has(String(id)));
     if (deadVariantIds.length === 0) return [];
     
     const deadVariantInfo = await fetchVariantsByIds(deadVariantIds);
     const deadItemIds = Array.from(deadVariantInfo.values()).map(v => v.inventory_item_id).filter(Boolean);
-    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds); // Solo location attive
+    const deadInventory = await fetchInventoryLevelsForItems(deadItemIds);
     
     return deadVariantIds.map(vid => {
       const info = deadVariantInfo.get(String(vid));
@@ -400,23 +414,22 @@ async function detectDeadStock(variantIds, now, period = 'daily') {
   }
 }
 
-// ROP CALCULATION
+// ========================================
+// CALCOLO REORDER POINT (ROP)
+// ========================================
 function computeROP({sales30d, onHand, leadDays, safetyDays}) {
   const realLeadDays = leadDays || parseInt(process.env.ROP_LEAD_DAYS) || 7;
   const realSafetyDays = safetyDays || parseInt(process.env.ROP_SAFETY_DAYS) || 3;
   const dailyVel = Math.max(0, sales30d/30);
-  /*const rop = Math.ceil(dailyVel * (leadDays + safetyDays));
-  const target = Math.ceil(dailyVel * (leadDays + safetyDays + 14));*/
+  
   const rop = Math.ceil(dailyVel * (realLeadDays + realSafetyDays));
   const target = Math.ceil(dailyVel * (realLeadDays + realSafetyDays + 14));
   const coverage = dailyVel > 0 ? (onHand / dailyVel) : Infinity;
   const qty = Math.max(0, target - onHand);
   
   let urgency = 'medium';
-  /*if (coverage <= leadDays) urgency = 'critical';
-  else if (coverage <= (leadDays + safetyDays)) urgency = 'high';*/
   if (coverage <= realLeadDays) urgency = 'critical';
-    else if (coverage <= (realLeadDays + realSafetyDays)) urgency = 'high';
+  else if (coverage <= (realLeadDays + realSafetyDays)) urgency = 'high';
   
   return { 
     dailyVel: dailyVel.toFixed(2), 
@@ -426,7 +439,9 @@ function computeROP({sales30d, onHand, leadDays, safetyDays}) {
   };
 }
 
-// ABC ANALYSIS
+// ========================================
+// ANALISI ABC (REGOLA 80/20)
+// ========================================
 function computeABCAnalysis(rows) {
   const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
   let cumulativeRevenue = 0;
@@ -449,16 +464,17 @@ function computeABCAnalysis(rows) {
   });
 }
 
-// 4 GRAFICI COMPLETI
+// ========================================
+// GENERAZIONE GRAFICI SVG
+// ========================================
 const PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4"];
 
-// 3. FIX GRAFICI - gestisce dati singoli
 function donutSVG(parts, size=140) {
   if (!parts.length || parts.every(p => p.value === 0)) {
     return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:50%;color:#9ca3af;font-size:12px;">Sin datos</div>`;
   }
 
-  // Se c'e' UN SOLO dato, fai cerchio completo
+  // Gestisce caso con un solo dato
   if (parts.length === 1) {
     return `
     <div style="width:${size}px;height:${size}px;border-radius:50%;background:${PALETTE[0]};display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:14px;margin:0 auto;">
@@ -466,6 +482,7 @@ function donutSVG(parts, size=140) {
     </div>`;
   }
 
+  // Genera SVG donut chart
   const total = parts.reduce((s,p)=>s+p.value,0) || 1;
   const r = size/2 - 10, cx=size/2, cy=size/2, w=20;
   let a0 = -Math.PI/2, segs="";
@@ -485,67 +502,16 @@ function donutSVG(parts, size=140) {
   
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
 }
-// Función para generar URLs de gráficos estáticos con QuickChart
-/*function generateChartUrl(chartConfig, width = 140, height = 140) {
-  const config = {
-    ...chartConfig,
-    options: {
-      ...chartConfig.options,
-      plugins: {
-        legend: { display: false }, // Sin leyenda para que sea más compacto
-        datalabels: { display: false }
-      }
-    }
-  };
-  
-  const encodedConfig = encodeURIComponent(JSON.stringify(config));
-  return `https://quickchart.io/chart?c=${encodedConfig}&w=${width}&h=${height}&f=png&bkg=white`;
-}
 
-function donutSVG(parts, size = 140) {
-  if (!parts.length || parts.every(p => p.value === 0)) {
-    return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;color:#9ca3af;font-size:12px;">Sin datos</div>`;
-  }
-
-  // Configuración Chart.js para QuickChart
-  const chartConfig = {
-    type: 'doughnut',
-    data: {
-      labels: parts.map(p => p.label),
-      datasets: [{
-        data: parts.map(p => p.value),
-        backgroundColor: parts.map((_, i) => PALETTE[i % PALETTE.length]),
-        borderColor: '#ffffff',
-        borderWidth: 2
-      }]
-    },
-    options: {
-      responsive: false,
-      maintainAspectRatio: false,
-      cutout: '60%', // Para hacer el donut
-      plugins: {
-        legend: { display: false },
-        datalabels: { display: false }
-      }
-    }
-  };
-
-  const chartUrl = generateChartUrl(chartConfig, size, size);
-  
-  return `<img src="${chartUrl}" alt="Chart" style="width:${size}px;height:${size}px;border-radius:8px;" onerror="this.style.display='none';" />`;
-}*/
-
-// 4. FIX HORARIOS - usa timezone corretto
-// Sostituisci TUTTA la funzione chartsHTML (dalle linee 497 alle 709) con questa versione corretta:
-
+// ========================================
+// GENERAZIONE GRAFICI DASHBOARD
+// ========================================
 function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
-  console.log(`=== CHARTHTML: Processing ${orders.length} orders ===`);
-  
   const locStats = locationStatsParam || {};
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
 
-  // 1) Canali di vendita CON DETTAGLI LOCATION
+  // 1) Canali di vendita per location
   const chObj = {};
   if (Object.keys(locStats).length) {
     for (const [locationName, stats] of Object.entries(locStats)) {
@@ -556,36 +522,26 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
       }
     }
   } else {
-    // fallback: calcolo per canale direttamente dagli ordini
+    // Fallback: calcolo diretto dagli ordini
     for (const o of orders) {
       const ch = (o.source_name || "unknown").toLowerCase();
       chObj[ch] = (chObj[ch]||0) + pieces(o);
     }
   }
 
-  // 2) Tipo di pago - CON LOGGING E FIX USO INTERNO
+  // 2) Analisi tipi di pagamento con gestione casi speciali
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
     
-    // Log per tutti gli ordini
-    console.log(`Ordine ${o.id} del ${orderDate.toFormat('dd/MM')}: total="${o.total_price}" (${typeof o.total_price}), gws=[${gws.join(',')}], customer=${o.customer?.first_name || 'N/A'}`);
-    
-    // PRIMO CONTROLLO: Uso Interno (gateway vuoto E totale 0)
-    // PRIMO CONTROLLO: Uso Interno (gateway vuoto indipendentemente dal totale)
+    // CASO SPECIALE: Uso Interno (gateway vuoto)
     if (gws.length === 0) {
-      console.log(`>>> USO INTERNO TROVATO: ordine ${o.id}, total=${o.total_price}`);
       grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
       continue; 
     }
     
-    // Log per gateway vuoti che NON sono uso interno
-    if (gws.length === 0) {
-      console.log(`>>> GATEWAY VUOTO ma NON uso interno: ordine ${o.id}, total=${o.total_price}, isZero=${Number(o.total_price) === 0}`);
-    }
-    
-    // Analizza i gateway per determinare il tipo di pagamento
+    // Analizza gateway per determinare tipo di pagamento
     const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
     const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
     const hasFiserv = gws.some(g => g.toLowerCase().includes("fiserv"));
@@ -594,7 +550,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     
     let paymentType;
     
-    // Logica di classificazione migliorata
+    // Logica di classificazione per pagamenti misti e singoli
     if (hasCash && hasFiserv) {
       paymentType = "Mixto (Cash + Fiserv Pos)";
     } else if (hasCash && hasPayPal) {
@@ -612,14 +568,13 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     } else if (hasMercadoPago) {
       paymentType = "Mercado Pago";
     } else {
-      console.log(`>>> QUESTO DIVENTA OTRO: ordine ${o.id}, gws=[${gws.join(',')}], total=${o.total_price}`);
-      paymentType = `Otro test (${gws.join(', ')})`;
+      paymentType = `Otro (${gws.join(', ')})`;
     }
     
     grpObj[paymentType] = (grpObj[paymentType]||0) + pieces(o);
   }
 
-  // 3) Franjas horarias - FIX TIMEZONE
+  // 3) Analisi fasce orarie
   const hourObj = {};
   for (const o of orders) {
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
@@ -633,7 +588,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     hourObj[timeSlot] = (hourObj[timeSlot]||0) + pieces(o);
   }
 
-  // 4) Rangos de ticket
+  // 4) Analisi range di ticket
   const ticketObj = {};
   for (const o of orders) {
     const total = revenue(o);
@@ -645,8 +600,6 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     ticketObj[range] = (ticketObj[range]||0) + 1;
   }
 
-  console.log('=== RISULTATI PAGAMENTI ===', grpObj);
-
   const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
 
   const sections = [
@@ -656,7 +609,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
   ];
 
-  // Rendering HTML
+  // Rendering responsive basato su email/web
   if (isEmail) {
     const chartSize = 100;
     return `
@@ -706,9 +659,11 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   </div>`;
 }
 
-// La prossima funzione dovrebbe essere renderLocationBreakdown che inizia alla linea ~710
+// ========================================
+// FUNZIONI DI RENDERING HTML
+// ========================================
 
-  // 3. Location breakdown rendering - AGGIUNGI
+// Render breakdown per location
 function renderLocationBreakdown(locationStats, isEmail = false) {
   const locations = Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue);
   
@@ -730,7 +685,7 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
   </div>`;
 }
 
-// 5. Email semplificata - AGGIUNGI
+// Template email semplificato
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
@@ -741,7 +696,7 @@ function buildEmailHTML(data) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Reporte de Ventas  TEST - ${label}</title>
+  <title>Reporte de Ventas - ${label}</title>
   ${styles(true)}
 </head>
 <body>
@@ -789,25 +744,12 @@ function buildEmailHTML(data) {
         PDF archivado automáticamente • Performance: ${timing?.total || 0}ms
       </div>
     </div>
-
-    <footer style="margin-top:30px;padding-top:16px;border-top:1px solid #e5e7eb;">
-      <div style="font-size:11px;color:#6b7280;text-align:center;">
-        <div style="margin-bottom:8px;"><strong>Trigger Manual:</strong></div>
-        <div>
-          <a href="${baseUrl}/api/cron/smart-report?trigger=daily" style="color:#059669;text-decoration:none;">Diario</a> |
-          <a href="${baseUrl}/api/cron/smart-report?trigger=weekly" style="color:#2563eb;text-decoration:none;">Semanal</a> |
-          <a href="${baseUrl}/api/cron/smart-report?trigger=monthly" style="color:#8b5cf6;text-decoration:none;">Mensual</a>
-        </div>
-      </div>
-    </footer>
   </div>
 </body>
 </html>`;
 }
 
-
-
-// RENDER FUNCTIONS
+// Render analisi conversion rate
 function renderConversionAnalysis(conversionData, isEmail = false) {
   if (!conversionData.length) return '';
   
@@ -820,13 +762,14 @@ function renderConversionAnalysis(conversionData, isEmail = false) {
           <div style="font-weight:600;color:#374151;font-size:${isEmail ? 11 : 12}px;">${data.channel}</div>
           <div style="font-size:${isEmail ? 16 : 20}px;font-weight:700;color:#0369a1;margin:4px 0;">${data.conversionRate}%</div>
           <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">${data.orders} ordenes</div>
-          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">AOV: $${data.aov}</div>
+          <div style="font-size:${isEmail ? 9 : 10}px;color:#6b7280;">AOV: ${data.aov}</div>
         </div>
       `).join('')}
     </div>
   </div>`;
 }
 
+// Render alert dead stock
 function renderDeadStockAlert(deadStockData, isEmail = false) {
   if (!deadStockData.length) {
     return `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:20px 0;text-align:center;"><strong style="color:#166534;">Excelente!</strong> No hay productos estancados (sin ventas 60+ dias)</div>`;
@@ -852,8 +795,7 @@ function renderDeadStockAlert(deadStockData, isEmail = false) {
   </div>`;
 }
 
-// 6. FIX ABC ANALYSIS - mostra prodotti top
-
+// Render summary analisi ABC
 function renderABCSummary(abcData) {
   const categories = {
     A: abcData.filter(r => r.abcCategory === 'A'),
@@ -899,6 +841,7 @@ function renderABCSummary(abcData) {
   </div>`;
 }
 
+// Render tabella prodotti venduti
 function renderProductsTable(rows, isEmail = false) {
   const maxRows = isEmail ? 15 : 50;
   const displayRows = rows.slice(0, maxRows);
@@ -947,6 +890,7 @@ function renderProductsTable(rows, isEmail = false) {
   return `<h3>Top productos vendidos</h3><table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
+// Render tabella reorder point
 function renderROPTable(rows, isEmail = false) {
   if (!rows.length) {
     return `<div style="margin:16px 0;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;text-align:center;"><strong style="color:#166534;">Excelente!</strong> Todos los productos tienen stock suficiente.</div>`;
@@ -1002,6 +946,9 @@ function renderROPTable(rows, isEmail = false) {
     <table>${head}<tbody>${body}</tbody></table>${moreText}`;
 }
 
+// ========================================
+// CSS STYLES RESPONSIVE
+// ========================================
 function styles(isEmail = false) {
   return `
   <style>
@@ -1020,6 +967,7 @@ function styles(isEmail = false) {
     .stat-number{font-size:${isEmail?18:24}px;font-weight:700;color:#1f2937;margin:4px 0}
     .stat-label{color:#6b7280;font-size:${isEmail?10:12}px;text-transform:uppercase;letter-spacing:0.5px}
     
+    /* Evidenziazione righe critiche */
     .row-zero{background-color:#fef2f2 !important} 
     .row-zero td{border-color:#fecaca !important}
     .row-one{background-color:#fff7ed !important}  
@@ -1027,10 +975,12 @@ function styles(isEmail = false) {
     .row-critical{background-color:#fdf2f8 !important}
     .row-critical td{border-color:#f9a8d4 !important}
     
+    /* Pills per urgenza */
     .pill-critical{background:#ec4899;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
     .pill-high{background:#eab308;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
     .pill-medium{background:#059669;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
     
+    /* Responsive design */
     ${isEmail ? '' : `
     @media (max-width: 768px) {
       body{margin:10px}.container{padding:16px}
@@ -1041,25 +991,28 @@ function styles(isEmail = false) {
   </style>`;
 }
 
-// MAIN HANDLER con opzione per inventory globale
+// ========================================
+// MAIN HANDLER - CONTROLLER PRINCIPALE
+// ========================================
 export default async function handler(req, res) {
-  console.log("=== SALES REPORT HANDLER AVVIATO ===", new Date().toISOString(), "debug:", req.query.debug);
   const startTime = Date.now();
   const timing = {};
   
   try {
+    // Parsing parametri URL
     const period = (req.query.period || "daily").toLowerCase();
     const today = req.query.today === "1";
     const email = req.query.email === "1";
     const preview = req.query.preview === "1";
     const debug = req.query.debug === "1";
-    
     const includeAllLocations = req.query.include_all_locations === "1";
 
+    // Calcolo range temporale
     const { tz, now, start, end } = await computeRange(period, today);
     const cacheKey = getCacheKey(period, today, start, end) + (includeAllLocations ? '-all' : '');
     const cacheTTL = getCacheTTL(period, today);
     
+    // Controllo cache (skip in debug mode)
     if (!debug) {
       const cached = getFromCache(cacheKey, cacheTTL);
       if (cached) {
@@ -1075,18 +1028,22 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log(`Processing ${period} - TTL: ${Math.floor(cacheTTL/1000/60)}min${includeAllLocations ? ' - INCLUDING ALL LOCATIONS' : ''}`);
-
+    // === ELABORAZIONE DATI PRINCIPALI ===
+    
+    // 1. Recupero ordini del periodo
     const t1 = Date.now();
     const orders = await fetchOrdersPaidInRange(start, end);
     timing.orders = Date.now() - t1;
 
+    // 2. Elaborazione prodotti e inventario
     const { rows, variantIds } = await processProductsComplete(orders, includeAllLocations);
+    
+    // 3. Analisi aggiuntive
     const conversions = calculateConversions(orders);
     const locationStats = await getLocationBreakdown(orders);
-    
     const deadStockData = await detectDeadStock(variantIds, now, period);
     
+    // 4. Calcolo dati storici per ROP (ultimi 30 giorni)
     const start30 = now.minus({days:30}).startOf("day");
     const orders30 = await fetchOrdersPaidInRange(start30, now.endOf("day"));
     
@@ -1098,6 +1055,7 @@ export default async function handler(req, res) {
       }
     }
     
+    // 5. Calcolo Reorder Points
     const ropRows = rows.map(r=>{
       const sales30d = sales30.get(r.variantId ?? `SKU:${r.sku||r.productTitle}`) || 0;
       const rop = computeROP({ 
@@ -1125,8 +1083,10 @@ export default async function handler(req, res) {
       return (urgencyOrder[a.urgency] || 3) - (urgencyOrder[b.urgency] || 3) || b.sales30d - a.sales30d;
     });
 
+    // 6. Analisi ABC
     const abcData = computeABCAnalysis(rows);
     
+    // 7. Confronto con periodo precedente
     let comparison = null;
     if (period !== 'monthly') {
       try {
@@ -1147,13 +1107,16 @@ export default async function handler(req, res) {
 
     timing.total = Date.now() - startTime;
 
+    // Generazione label periodo
     const label = period==="daily" ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}` :
                   period==="weekly" ? `Semana ${start.toFormat("dd LLL")} - ${end.toFormat("dd LLL yyyy")}` :
                   `${start.toFormat("LLLL yyyy")}`;
 
+    // Assemblaggio dati finali
     const reportData = {
       success: true,
-      label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, locationStats, // <-- aggiungi locationStats
+      label, tz, now, rows, orders, conversions, comparison, timing, 
+      deadStockData, ropRows, abcData, locationStats,
       includeAllLocations: includeAllLocations,
       stats: {
         totalProducts: rows.length,
@@ -1162,10 +1125,14 @@ export default async function handler(req, res) {
       }
     };
 
+    // Salvataggio in cache
     if (!debug) {
       setCache(cacheKey, reportData, cacheTTL);
     }
 
+    // === GESTIONE OUTPUT ===
+    
+    // Modalità email: ritorna JSON per sistema di mailing
     if (email && !preview) {
       const emailTemplate = {
         subject: `Reporte ventas ${period} - ${label} - ${orders.length} ordenes, ${money(reportData.stats.totalRevenue)}`,
@@ -1182,7 +1149,7 @@ export default async function handler(req, res) {
       });
     }
 
-    console.log("=== STA PER CHIAMARE buildCompleteHTML ===", orders.length, "orders");
+    // Modalità web: genera HTML completo
     const html = buildCompleteHTML(reportData, preview);
 
     res.setHeader("Content-Type", "text/html");
@@ -1196,15 +1163,19 @@ export default async function handler(req, res) {
   }
 }
 
+// ========================================
+// GENERAZIONE HTML COMPLETO
+// ========================================
 function buildCompleteHTML(data, isEmail = false) {
-  console.log("=== buildCompleteHTML CHIAMATA ===", data.orders.length, "orders, isEmail:", isEmail);
-  const { label, tz, now, rows, orders, conversions, comparison, timing, deadStockData, ropRows, abcData, includeAllLocations, locationStats } = data;
+  const { label, tz, now, rows, orders, conversions, comparison, timing, 
+          deadStockData, ropRows, abcData, includeAllLocations, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
 
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
-  
-const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas las locations)' : ' (Solo locations activas)';
+  const inventoryNote = data.includeAllLocations ? 
+    ' (Inventario GLOBAL - todas las locations)' : 
+    ' (Solo locations activas)';
 
   return `<!doctype html>
 <html lang="es">
@@ -1216,30 +1187,32 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
 </head>
 <body>
   <div class="container">
+    <!-- HEADER CON TÍTULO Y ESTADÍSTICAS PRINCIPALES -->
     <header style="text-align:center;${headerStyle}">
       <h1 style="margin:0;${isEmailMode?'color:white;':''}">Reporte de Ventas</h1>
       <h2 style="margin:8px 0;${isEmailMode?'color:#dbeafe;':'color:#4b5563;'}">${esc(label)}${inventoryNote}</h2>
       <div class="muted" style="${isEmailMode?'color:#bfdbfe;':''}">
         Generado: ${now.toFormat("dd LLL yyyy, HH:mm")} (${esc(tz)})
-        ${comparison ? ` - vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? 'up' : 'down'} ${Math.abs(comparison.revPercent)}%</strong>` : ''}
+        ${comparison ? ` - vs anterior: <strong style="color:${comparison.revChange >= 0 ? '#10b981' : '#ef4444'}">${comparison.revChange >= 0 ? '+' : ''}${comparison.revPercent}%</strong>` : ''}
       </div>
     </header>
 
+    <!-- TARJETAS ESTADÍSTICAS PRINCIPALES -->
     <div class="stats-grid">
       <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">Productos</div>
         <div class="stat-number">${rows.length}</div>
-        <div class="stat-label">Productos unicos</div>
+        <div class="stat-label">Productos únicos</div>
       </div>
       <div class="stat-card">
-        <div style="font-size:20px;margin-bottom:4px;">Ordenes</div>
+        <div style="font-size:20px;margin-bottom:4px;">Órdenes</div>
         <div class="stat-number">${orders.length}</div>
-        <div class="stat-label">Ordenes procesadas</div>
+        <div class="stat-label">Órdenes procesadas</div>
       </div>
       <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">Ingresos</div>
         <div class="stat-number">${money(totRev)}</div>
-        <div class="stat-label">Total vendite</div>
+        <div class="stat-label">Total ventas</div>
       </div>
       <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">Ticket</div>
@@ -1249,10 +1222,11 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
       <div class="stat-card">
         <div style="font-size:20px;margin-bottom:4px;">Stock</div>
         <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
-        <div class="stat-label">Stock critico</div>
+        <div class="stat-label">Stock crítico</div>
       </div>
     </div>
 
+    <!-- SECCIONES PRINCIPALES DEL REPORTE -->
     ${renderLocationBreakdown(locationStats, isEmailMode)}
     ${renderDeadStockAlert(deadStockData, isEmailMode)}
     ${renderROPTable(ropRows, isEmailMode)}
@@ -1261,6 +1235,7 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
     ${renderConversionAnalysis(conversions, isEmailMode)}
     ${chartsHTML(orders, isEmailMode, locationStats)}
 
+    <!-- FOOTER CON NAVIGAZIONE E OPZIONI -->
     <footer style="margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
       <div class="muted">
         <div style="margin-bottom:8px;">
@@ -1281,7 +1256,6 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
           <a href="?preview=1" style="color:#10b981;">Preview Email</a> |
           <a href="?debug=1" style="color:#8b5cf6;">Debug</a> |
           <a href="/api/debug-inventory" style="color:#dc2626;">Debug Inventory</a>
-          <strong style="color:#dc2626;">v2.0</strong>
         </div>
         ` : ''}
       </div>
@@ -1289,4 +1263,4 @@ const inventoryNote = data.includeAllLocations ? ' (Inventario GLOBAL - todas la
   </div>
 </body>
 </html>`;
-}          
+}
