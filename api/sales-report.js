@@ -1224,7 +1224,7 @@ export default async function handler(req, res) {
     if (email && !preview) {
       const emailTemplate = {
         subject: `Reporte ventas ${period} - ${label} - ${orders.length} ordenes, ${money(reportData.stats.totalRevenue)}`,
-        html: buildEmailHTML(reportData, true),
+        html: buildEmailHTML(reportData),
         text: `Reporte ventas ${period} - ${label}\nVer online: ${process.env.VERCEL_URL}/api/sales-report?period=${period}`
       };
       
@@ -1237,8 +1237,17 @@ export default async function handler(req, res) {
       });
     }
 
+    // Modalità preview email: mostra HTML email
+    if (preview) {
+      const emailHtml = buildEmailHTML(reportData);
+      res.setHeader("Content-Type", "text/html");
+      res.setHeader("X-Cache", "MISS");
+      res.setHeader("X-Preview", "Email Template");
+      return res.status(200).send(emailHtml);
+    }
+
     // Modalità web: genera HTML completo
-    const html = buildCompleteHTML(reportData, preview);
+    const html = buildCompleteHTML(reportData, false);
 
     res.setHeader("Content-Type", "text/html");
     res.setHeader("X-Cache", "MISS");
