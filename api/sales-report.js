@@ -685,8 +685,7 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
   </div>`;
 }
 
-// Template email ultra-semplificato - solo statistiche testuali
-// Template email ultra-semplificato - solo statistiche testuali + lista out of stock
+// Template email ultra-semplificato - solo statistiche testuali + liste stock
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
@@ -718,22 +717,17 @@ function buildEmailHTML(data) {
   }
   const topPayments = Object.entries(paymentData).sort((a,b)=>b[1]-a[1]).slice(0,3);
   
-  // Lista prodotti out of stock (inventory = 0)
+  // Lista prodotti per categoria (senza sovrapposizioni)
   const outOfStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 0);
-  const maxOutOfStockShow = 10;
+  const criticalStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 1);
+  const lowStockProducts = rows.filter(r => {
+    const inv = Number(r.inventoryAvailable || 0);
+    return inv >= 2 && inv <= 5;
+  });
   
-  // Stock critico e basso
-// Prodotti per categoria (senza sovrapposizioni)
-const outOfStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 0);
-const criticalStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 1);
-const lowStockProducts = rows.filter(r => {
-  const inv = Number(r.inventoryAvailable || 0);
-  return inv >= 2 && inv <= 4;
-});
-
-// Per gli alert generici
-const criticalStock = criticalStockProducts.length; // Solo quelli con 1
-const lowStock = lowStockProducts.length; // Solo quelli tra 2-5
+  const maxOutOfStockShow = 10;
+  const maxCriticalShow = 10;
+  
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -840,20 +834,35 @@ const lowStock = lowStockProducts.length; // Solo quelli tra 2-5
       </div>
       ` : ''}
 
-      <!-- ALERTAS DE STOCK -->
-      ${criticalStock > 0 ? `
-      <div class="alert">
-        <strong>🚨 Stock Crítico:</strong> ${criticalStock} productos con inventario = 1 unidad
-      </div>
-      ` : ''}
-      
-      ${lowStock > criticalStock ? `
+      <!-- PRODOTTI CON 1 UNITÀ (STOCK CRITICO) -->
+      ${criticalStockProducts.length > 0 ? `
       <div class="warning">
-        <strong>⚡ Stock Bajo:</strong> ${lowStock - criticalStock} productos con inventario > 1 y  < 5 unidades
+        <strong>⚡ Productos con 1 Unidad Rimasta (${criticalStockProducts.length}):</strong>
+        <div class="product-list">
+          ${criticalStockProducts.slice(0, maxCriticalShow).map(p => `
+            <div class="product-item">• ${esc(p.productTitle)} ${p.variantTitle !== 'Default Title' ? `- ${esc(p.variantTitle)}` : ''} (Vendidas: ${p.soldQty})</div>
+          `).join('')}
+          ${criticalStockProducts.length > maxCriticalShow ? `
+            <div style="margin-top:6px;font-style:italic;color:#666;">... y ${criticalStockProducts.length - maxCriticalShow} productos más con 1 unidad</div>
+          ` : ''}
+        </div>
       </div>
       ` : ''}
 
-      ${criticalStock === 0 && lowStock === 0 ? `
+      <!-- ALERTAS DE STOCK CON DESCRIZIONI CHIARE -->
+      ${criticalStockProducts.length > 0 ? `
+      <div class="alert">
+        <strong>🚨 Stock Crítico:</strong> ${criticalStockProducts.length} productos con exactamente 1 unidad
+      </div>
+      ` : ''}
+      
+      ${lowStockProducts.length > 0 ? `
+      <div class="warning">
+        <strong>⚡ Stock Bajo:</strong> ${lowStockProducts.length} productos con 2-5 unidades
+      </div>
+      ` : ''}
+
+      ${outOfStockProducts.length === 0 && criticalStockProducts.length === 0 && lowStockProducts.length === 0 ? `
       <div class="success">
         <strong>✅ Stock OK:</strong> Todos los productos tienen inventario suficiente
       </div>
