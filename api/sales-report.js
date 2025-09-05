@@ -686,14 +686,13 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
 }
 
 // Template email ultra-semplificato - solo statistiche testuali
+// Template email ultra-semplificato - solo statistiche testuali + lista out of stock
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
-  const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
   
   // Calcolo dati per sezioni testuali
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
-  const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
   
   // Analisi canali di vendita
   const channelData = {};
@@ -719,8 +718,13 @@ function buildEmailHTML(data) {
   }
   const topPayments = Object.entries(paymentData).sort((a,b)=>b[1]-a[1]).slice(0,3);
   
-  // Stock crítico
+  // Lista prodotti out of stock (inventory = 0)
+  const outOfStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 0);
+  const maxOutOfStockShow = 8;
+  
+  // Stock critico e basso
   const criticalStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length;
+  const lowStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=5).length;
   
   return `<!doctype html>
 <html lang="es">
@@ -740,7 +744,10 @@ function buildEmailHTML(data) {
     .section h3{margin:0 0 10px;color:#374151;font-size:16px}
     .alert{background:#fef2f2;border:1px solid #fecaca;padding:15px;border-radius:6px;margin:15px 0}
     .success{background:#f0fdf4;border:1px solid #bbf7d0;padding:15px;border-radius:6px;margin:15px 0}
+    .warning{background:#fffbeb;border:1px solid #fde68a;padding:15px;border-radius:6px;margin:15px 0}
     .footer{background:#f8fafc;padding:15px;text-align:center;font-size:12px;color:#666}
+    .product-list{font-size:11px;line-height:1.4;margin-top:8px}
+    .product-item{margin:2px 0;padding:2px 0}
   </style>
 </head>
 <body>
@@ -801,7 +808,7 @@ function buildEmailHTML(data) {
       ${Object.keys(locationStats).length > 0 ? `
       <div class="section">
         <h3>📍 Ventas por Location</h3>
-        ${Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue).map(([name, stats]) => `
+        ${Object.entries(locationStats).sort((a,b) => b[1].revenue - a[1].revenue).slice(0,3).map(([name, stats]) => `
           <div class="stat-row">
             <span class="stat-label">${name}:</span>
             <span class="stat-value">${money(stats.revenue)} (${stats.orders} órdenes)</span>
@@ -810,27 +817,53 @@ function buildEmailHTML(data) {
       </div>
       ` : ''}
 
+      <!-- PRODUCTOS OUT OF STOCK -->
+      ${outOfStockProducts.length > 0 ? `
+      <div class="alert">
+        <strong>⚠️ Productos Sin Stock (${outOfStockProducts.length}):</strong>
+        <div class="product-list">
+          ${outOfStockProducts.slice(0, maxOutOfStockShow).map(p => `
+            <div class="product-item">• ${esc(p.productTitle)} ${p.variantTitle !== 'Default Title' ? `- ${esc(p.variantTitle)}` : ''} (Vendidas: ${p.soldQty})</div>
+          `).join('')}
+          ${outOfStockProducts.length > maxOutOfStockShow ? `
+            <div style="margin-top:6px;font-style:italic;color:#666;">... y ${outOfStockProducts.length - maxOutOfStockShow} productos más sin stock</div>
+          ` : ''}
+        </div>
+      </div>
+      ` : ''}
+
       <!-- ALERTAS DE STOCK -->
       ${criticalStock > 0 ? `
       <div class="alert">
-        <strong>⚠️ Stock Crítico:</strong> ${criticalStock} productos con inventario ≤ 1 unidad
+        <strong>🚨 Stock Crítico:</strong> ${criticalStock} productos con inventario ≤ 1 unidad
       </div>
-      ` : `
+      ` : ''}
+      
+      ${lowStock > criticalStock ? `
+      <div class="warning">
+        <strong>⚡ Stock Bajo:</strong> ${lowStock - criticalStock} productos con inventario ≤ 5 unidades
+      </div>
+      ` : ''}
+
+      ${criticalStock === 0 && lowStock === 0 ? `
       <div class="success">
         <strong>✅ Stock OK:</strong> Todos los productos tienen inventario suficiente
       </div>
-      `}
+      ` : ''}
 
-      <!-- LINK AL REPORTE COMPLETO -->
+      <!-- NOTA ALLEGATO -->
       <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:15px;margin:20px 0;text-align:center;">
-        <div style="font-weight:600;margin-bottom:8px;">📊 Reporte Completo</div>
-        <a href="${baseUrl}/api/sales-report?period=daily" style="color:#2563eb;text-decoration:none;font-weight:500;">Ver Análisis Detallado Online</a>
+        <div style="font-weight:600;margin-bottom:8px;">📎 Análisis Completo</div>
+        <div style="font-size:13px;color:#374151;">
+          Descarga y abre el archivo adjunto HTML con tu navegador para ver:<br>
+          • Gráficos interactivos • Análisis ABC • Tablas completas • Dead Stock • ROP
+        </div>
       </div>
     </div>
 
-<div class="footer">
-  Reporte automático | Performance: ${timing?.total || 0}ms | Version: 2.1-FIX
-</div>
+    <div class="footer">
+      Reporte automático | Performance: ${timing?.total || 0}ms | Versión: 2.1
+    </div>
   </div>
 </body>
 </html>`;
