@@ -828,10 +828,9 @@ function buildEmailHTML(data) {
       </div>
     </div>
 
-    <div class="footer">
-      Generado automáticamente por Sistema de Reportes<br>
-      Performance: ${timing?.total || 0}ms
-    </div>
+<div class="footer">
+  Reporte automático | Performance: ${timing?.total || 0}ms | Version: 2.1-FIX
+</div>
   </div>
 </body>
 </html>`;
