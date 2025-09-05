@@ -722,7 +722,7 @@ function buildEmailHTML(data) {
   const criticalStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 1);
   const lowStockProducts = rows.filter(r => {
     const inv = Number(r.inventoryAvailable || 0);
-    return inv >= 2 && inv <= 5;
+    return inv >= 2 && inv <= 4;
   });
   
   const maxOutOfStockShow = 10;
@@ -858,7 +858,7 @@ function buildEmailHTML(data) {
       
       ${lowStockProducts.length > 0 ? `
       <div class="warning">
-        <strong>⚡ Stock Bajo:</strong> ${lowStockProducts.length} productos con 2-5 unidades
+        <strong>⚡ Stock Bajo:</strong> ${lowStockProducts.length} productos con 2-4 unidades
       </div>
       ` : ''}
 
