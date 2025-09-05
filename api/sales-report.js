@@ -720,12 +720,16 @@ function buildEmailHTML(data) {
   
   // Lista prodotti out of stock (inventory = 0)
   const outOfStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 0);
-  const maxOutOfStockShow = 8;
+  const maxOutOfStockShow = 10;
   
   // Stock critico e basso
-  const criticalStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length;
-  const lowStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=5).length;
-  
+  //const criticalStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length;
+  const criticalStock = rows.filter(r => Number(r.inventoryAvailable || 0) === 1);
+  //const lowStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=5).length;
+  const lowStock= rows.filter(r => {
+  const inv = Number(r.inventoryAvailable || 0);
+  return inv >= 2 && inv <= 4;
+});
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -835,13 +839,13 @@ function buildEmailHTML(data) {
       <!-- ALERTAS DE STOCK -->
       ${criticalStock > 0 ? `
       <div class="alert">
-        <strong>🚨 Stock Crítico:</strong> ${criticalStock} productos con inventario ≤ 1 unidad
+        <strong>🚨 Stock Crítico:</strong> ${criticalStock} productos con inventario = 1 unidad
       </div>
       ` : ''}
       
       ${lowStock > criticalStock ? `
       <div class="warning">
-        <strong>⚡ Stock Bajo:</strong> ${lowStock - criticalStock} productos con inventario ≤ 5 unidades
+        <strong>⚡ Stock Bajo:</strong> ${lowStock - criticalStock} productos con inventario > 1 y  < 5 unidades
       </div>
       ` : ''}
 
