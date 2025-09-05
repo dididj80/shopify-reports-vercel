@@ -723,13 +723,17 @@ function buildEmailHTML(data) {
   const maxOutOfStockShow = 10;
   
   // Stock critico e basso
-  //const criticalStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length;
-  const criticalStock = rows.filter(r => Number(r.inventoryAvailable || 0) === 1);
-  //const lowStock = rows.filter(r=>Number(r.inventoryAvailable||0)<=5).length;
-  const lowStock= rows.filter(r => {
+// Prodotti per categoria (senza sovrapposizioni)
+const outOfStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 0);
+const criticalStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 1);
+const lowStockProducts = rows.filter(r => {
   const inv = Number(r.inventoryAvailable || 0);
   return inv >= 2 && inv <= 4;
 });
+
+// Per gli alert generici
+const criticalStock = criticalStockProducts.length; // Solo quelli con 1
+const lowStock = lowStockProducts.length; // Solo quelli tra 2-5
   return `<!doctype html>
 <html lang="es">
 <head>
