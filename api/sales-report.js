@@ -747,6 +747,7 @@ function buildEmailHTML(data) {
     .alert{background:#fef2f2;border:1px solid #fecaca;padding:15px;border-radius:6px;margin:15px 0}
     .success{background:#f0fdf4;border:1px solid #bbf7d0;padding:15px;border-radius:6px;margin:15px 0}
     .warning{background:#fffbeb;border:1px solid #fde68a;padding:15px;border-radius:6px;margin:15px 0}
+    .info{background:#f0f9ff;border:1px solid #bae6fd;padding:15px;border-radius:6px;margin:15px 0}
     .footer{background:#f8fafc;padding:15px;text-align:center;font-size:12px;color:#666}
     .product-list{font-size:11px;line-height:1.4;margin-top:8px}
     .product-item{margin:2px 0;padding:2px 0}
@@ -837,7 +838,7 @@ function buildEmailHTML(data) {
       <!-- PRODOTTI CON 1 UNITÀ (STOCK CRITICO) -->
       ${criticalStockProducts.length > 0 ? `
       <div class="warning">
-        <strong>⚡ Productos con 1 Unidad Rimasta (${criticalStockProducts.length}):</strong>
+        <strong>⚡ Productos con 1 Unidad Restante (${criticalStockProducts.length}):</strong>
         <div class="product-list">
           ${criticalStockProducts.slice(0, maxCriticalShow).map(p => `
             <div class="product-item">• ${esc(p.productTitle)} ${p.variantTitle !== 'Default Title' ? `- ${esc(p.variantTitle)}` : ''} (Vendidas: ${p.soldQty})</div>
@@ -848,17 +849,10 @@ function buildEmailHTML(data) {
         </div>
       </div>
       ` : ''}
-
-      <!-- ALERTAS DE STOCK CON DESCRIZIONI CHIARE -->
-      ${criticalStockProducts.length > 0 ? `
-      <div class="alert">
-        <strong>🚨 Stock Crítico:</strong> ${criticalStockProducts.length} productos con exactamente 1 unidad
-      </div>
-      ` : ''}
       
       ${lowStockProducts.length > 0 ? `
-      <div class="warning">
-        <strong>⚡ Stock Bajo:</strong> ${lowStockProducts.length} productos con 2-4 unidades
+      <div class="info">
+        <strong>📦 Stock Bajo:</strong> ${lowStockProducts.length} productos con 2-4 unidades
       </div>
       ` : ''}
 
