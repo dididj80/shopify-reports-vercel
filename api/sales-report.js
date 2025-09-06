@@ -506,6 +506,9 @@ function donutSVG(parts, size=140) {
 // ========================================
 // GENERAZIONE GRAFICI DASHBOARD
 // ========================================
+// ========================================
+// GENERAZIONE GRAFICI DASHBOARD
+// ========================================
 function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   const locStats = locationStatsParam || {};
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
@@ -529,15 +532,18 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     }
   }
 
-  // 2) Analisi tipi di pagamento con gestione casi speciali
+  // 2) Analisi tipi di pagamento con gestione casi speciali E REVENUE
   const grpObj = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
+    const orderRevenue = revenue(o);
     
     // CASO SPECIALE: Uso Interno (gateway vuoto)
     if (gws.length === 0) {
-      grpObj["Uso Interno"] = (grpObj["Uso Interno"] || 0) + pieces(o);
+      if (!grpObj["Uso Interno"]) grpObj["Uso Interno"] = { items: 0, revenue: 0 };
+      grpObj["Uso Interno"].items += pieces(o);
+      grpObj["Uso Interno"].revenue += orderRevenue;
       continue; 
     }
     
@@ -571,7 +577,9 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
       paymentType = `Otro (${gws.join(', ')})`;
     }
     
-    grpObj[paymentType] = (grpObj[paymentType]||0) + pieces(o);
+    if (!grpObj[paymentType]) grpObj[paymentType] = { items: 0, revenue: 0 };
+    grpObj[paymentType].items += pieces(o);
+    grpObj[paymentType].revenue += orderRevenue;
   }
 
   // 3) Analisi fasce orarie
@@ -601,10 +609,13 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   }
 
   const top = (obj) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v}));
+  
+  // Preparazione pagamenti con revenue per legenda
+  const topPayments = Object.entries(grpObj).sort((a,b)=>b[1].items-a[1].items).slice(0,8).map(([k,v])=>({label:k,value:v.items,revenue:v.revenue}));
 
   const sections = [
     { title:"Canales de venta", parts: top(chObj) },
-    { title:"Tipo de pago", parts: top(grpObj) },
+    { title:"Tipo de pago", parts: topPayments },
     { title:"Horarios de venta", parts: Object.entries(hourObj).map(([k,v])=>({label:k,value:v})) },
     { title:"Rangos de ticket", parts: Object.entries(ticketObj).map(([k,v])=>({label:k,value:v})) },
   ];
@@ -625,7 +636,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
               <div style="display:flex;align-items:center;margin:2px 0;">
                 <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
                 <span style="flex:1;">${esc(p.label)}</span>
-                <span style="font-weight:600;">${p.value}</span>
+                <span style="font-weight:600;">${sec.title === "Tipo de pago" && p.revenue ? `${p.value} (${money(p.revenue)})` : p.value}</span>
               </div>
             `).join("")}
           </div>
@@ -650,7 +661,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
             <div style="display:flex;align-items:center;margin:4px 0;">
               <span style="display:inline-block;width:12px;height:12px;background:${PALETTE[i%PALETTE.length]};margin-right:8px;border-radius:3px;"></span>
               <span style="flex:1;">${esc(p.label)}</span>
-              <span style="font-weight:600;">${p.value}</span>
+              <span style="font-weight:600;">${sec.title === "Tipo de pago" && p.revenue ? `${p.value} (${money(p.revenue)})` : p.value}</span>
             </div>
           `).join("")}
         </div>
@@ -686,6 +697,7 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
 }
 
 // Template email ultra-semplificato - solo statistiche testuali + liste stock
+// Template email ultra-semplificato - solo statistiche testuali + liste stock
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
   const totRev = rows.reduce((s,r)=>s+r.revenue,0);
@@ -701,21 +713,55 @@ function buildEmailHTML(data) {
   }
   const topChannels = Object.entries(channelData).sort((a,b)=>b[1]-a[1]).slice(0,3);
   
-  // Analisi pagamenti
+  // Analisi pagamenti CON TUTTI I SISTEMI (uguale a chartsHTML) + REVENUE
   const paymentData = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
+    const orderRevenue = o.line_items.reduce((s,li) => s + (Number(li.price||0) * Number(li.quantity||0)), 0);
+    const orderItems = pieces(o);
+    
+    let paymentKey;
+    
+    // CASO SPECIALE: Uso Interno (gateway vuoto)
     if (gws.length === 0) {
-      paymentData["Uso Interno"] = (paymentData["Uso Interno"] || 0) + pieces(o);
-    } else if (gws.some(g => g.toLowerCase().includes("fiserv"))) {
-      paymentData["Fiserv POS"] = (paymentData["Fiserv POS"] || 0) + pieces(o);
-    } else if (gws.some(g => g.toLowerCase().includes("cash"))) {
-      paymentData["Efectivo"] = (paymentData["Efectivo"] || 0) + pieces(o);
+      paymentKey = "Uso Interno";
     } else {
-      paymentData["Otros"] = (paymentData["Otros"] || 0) + pieces(o);
+      // Analizza gateway per determinare tipo di pagamento (LOGICA COMPLETA)
+      const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
+      const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
+      const hasFiserv = gws.some(g => g.toLowerCase().includes("fiserv"));
+      const hasShopifyPayments = gws.some(g => g.toLowerCase().includes("shopify_payments"));
+      const hasMercadoPago = gws.some(g => g.toLowerCase().includes("mercado"));
+      
+      // Logica di classificazione per pagamenti misti e singoli
+      if (hasCash && hasFiserv) {
+        paymentKey = "Mixto (Cash + Fiserv Pos)";
+      } else if (hasCash && hasPayPal) {
+        paymentKey = "Mixto (Cash + PayPal)";
+      } else if (hasCash && hasShopifyPayments) {
+        paymentKey = "Mixto (Cash + Tarjeta)";
+      } else if (hasCash) {
+        paymentKey = "Efectivo";
+      } else if (hasPayPal) {
+        paymentKey = "PayPal";
+      } else if (hasFiserv) {
+        paymentKey = "Fiserv Pos";
+      } else if (hasShopifyPayments) {
+        paymentKey = "Tarjeta (Shopify)";
+      } else if (hasMercadoPago) {
+        paymentKey = "Mercado Pago";
+      } else {
+        paymentKey = `Otro (${gws.join(', ')})`;
+      }
     }
+    
+    if (!paymentData[paymentKey]) {
+      paymentData[paymentKey] = { items: 0, revenue: 0 };
+    }
+    paymentData[paymentKey].items += orderItems;
+    paymentData[paymentKey].revenue += orderRevenue;
   }
-  const topPayments = Object.entries(paymentData).sort((a,b)=>b[1]-a[1]).slice(0,3);
+  const topPayments = Object.entries(paymentData).sort((a,b)=>b[1].revenue-a[1].revenue).slice(0,3);
   
   // Lista prodotti per categoria (senza sovrapposizioni)
   const outOfStockProducts = rows.filter(r => Number(r.inventoryAvailable || 0) === 0);
@@ -796,13 +842,13 @@ function buildEmailHTML(data) {
         `).join('')}
       </div>
 
-      <!-- MÉTODOS DE PAGO -->
+      <!-- MÉTODOS DE PAGO CON REVENUE -->
       <div class="section">
         <h3>💳 Métodos de Pago</h3>
-        ${topPayments.map(([method, items]) => `
+        ${topPayments.map(([method, data]) => `
           <div class="stat-row">
             <span class="stat-label">${method}:</span>
-            <span class="stat-value">${items} items</span>
+            <span class="stat-value">${data.items} items - ${money(data.revenue)}</span>
           </div>
         `).join('')}
       </div>
