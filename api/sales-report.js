@@ -866,6 +866,17 @@ function buildEmailHTML(data) {
       </div>
       ` : ''}
 
+      <!-- TOP 5 PRODUTOS VENDUTI -->
+      <div class="section">
+        <h3>🏆 Top 5 Productos Vendidos</h3>
+        ${rows.slice(0, 5).map((p, i) => `
+          <div class="stat-row">
+            <span class="stat-label">${i + 1}. ${esc(p.productTitle)}${p.variantTitle !== 'Default Title' ? ` - ${esc(p.variantTitle)}` : ''}:</span>
+            <span class="stat-value">${p.soldQty} vendidas - ${money(p.revenue)}</span>
+          </div>
+        `).join('')}
+      </div>
+
       <!-- PRODUCTOS OUT OF STOCK -->
       ${outOfStockProducts.length > 0 ? `
       <div class="alert">
