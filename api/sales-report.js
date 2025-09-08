@@ -707,6 +707,54 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
   </div>`;
 }
 
+// Sezione Uso Interno
+function renderUsoInternoSection(rows, isEmail = false) {
+  const usoInterno = rows.filter(r => r.revenue === 0 && r.soldQty > 0);
+  if (!usoInterno.length) return '';
+  
+  return `
+  <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin:20px 0;">
+    <h3 style="margin:0 0 12px;color:#0284c7;">🏥 Productos Uso Interno (${usoInterno.length})</h3>
+    <table style="margin:0;">
+      <thead><tr><th>Producto</th><th>Variante</th><th>Cantidad Usada</th><th>Stock Actual</th></tr></thead>
+      <tbody>
+        ${usoInterno.map(r => `
+          <tr class="row-uso-interno">
+            <td style="color:#0284c7;font-weight:600;">${esc(r.productTitle)}</td>
+            <td>${esc(r.variantTitle)}</td>
+            <td align="center"><strong>${r.soldQty}</strong></td>
+            <td align="center">${r.inventoryAvailable || 0}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+// Sezione Stock Crítico Vendidos
+function renderStockCriticoVendidosSection(rows, isEmail = false) {
+  const critico = rows.filter(r => Number(r.inventoryAvailable || 0) <= 1 && r.soldQty > 0);
+  if (!critico.length) return '';
+  
+  return `
+  <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px;margin:20px 0;">
+    <h3 style="margin:0 0 12px;color:#dc2626;">⚠️ Stock Crítico - Productos Vendidos (${critico.length})</h3>
+    <table style="margin:0;">
+      <thead><tr><th>Producto</th><th>Vendidas</th><th>Revenue</th><th>Stock</th></tr></thead>
+      <tbody>
+        ${critico.map(r => `
+          <tr class="${Number(r.inventoryAvailable || 0) === 0 ? 'row-zero' : 'row-one'}">
+            <td>${esc(r.productTitle)}</td>
+            <td align="center"><strong>${r.soldQty}</strong></td>
+            <td align="right">${money(r.revenue)}</td>
+            <td align="center"><strong style="color:${Number(r.inventoryAvailable || 0) === 0 ? '#dc2626' : '#f97316'}">${r.inventoryAvailable || 0}</strong></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  </div>`;
+}
+
 // Template email ultra-semplificato - solo statistiche testuali + liste stock
 // Template email ultra-semplificato - solo statistiche testuali + liste stock
 function buildEmailHTML(data) {
@@ -1521,6 +1569,8 @@ function buildCompleteHTML(data, isEmail = false) {
 
     <!-- SECCIONES PRINCIPALES DEL REPORTE -->
     ${renderLocationBreakdown(locationStats, isEmailMode)}
+    ${!isEmailMode ? renderUsoInternoSection(rows) : ''}
+    ${!isEmailMode ? renderStockCriticoVendidosSection(rows) : ''}
     ${renderDeadStockAlert(deadStockData, isEmailMode)}
     ${renderROPTable(ropRows, isEmailMode)}
     ${renderProductsTable(rows, isEmailMode)}
