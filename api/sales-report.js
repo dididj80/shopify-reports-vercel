@@ -946,7 +946,16 @@ function renderUsoInternoSection(rows, isEmail = false) {
 }
 
 function renderStockCriticoVendidosSection(rows, isEmail = false) {
-  const critico = rows.filter(r => Number(r.inventoryAvailable || 0) <= 1 && r.soldQty > 0);
+  const critico = rows
+  .filter(r => Number(r.inventoryAvailable || 0) <= 1 && r.soldQty > 0)
+  .sort((a,b) => {
+    // Prima out of stock (0), poi stock 1
+    const aStock = Number(a.inventoryAvailable || 0);
+    const bStock = Number(b.inventoryAvailable || 0);
+    if (aStock !== bStock) return aStock - bStock;
+    // Poi per quantità vendute (desc)
+    return b.soldQty - a.soldQty;
+  });
   if (!critico.length) return '';
   
   return `
@@ -1532,6 +1541,61 @@ function buildCompleteHTML(data, isEmail = false) {
         <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
         <div class="stat-label">Stock crítico</div>
       </div>
+    </div>
+
+      <!-- CARD SISTEMI DI PAGAMENTO DINAMICHE -->
+      ${(() => {
+        // Calcola sistemi di pagamento con revenue (stesso calcolo di buildEmailHTML)
+        const paymentData = {};
+        for (const o of orders) {
+          const gws = o.payment_gateway_names || [];
+          const orderRevenue = getOrderRevenue(o);
+          
+          let paymentKey;
+          if (gws.length === 0) {
+            paymentKey = "Uso Interno";
+          } else {
+            const hasCash = gws.some(g => g.toLowerCase().includes("cash") || g.toLowerCase().includes("efectivo"));
+            const hasFiserv = gws.some(g => g.toLowerCase().includes("fiserv"));
+            const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
+            const hasShopifyPayments = gws.some(g => g.toLowerCase().includes("shopify_payments"));
+            const hasMercadoPago = gws.some(g => g.toLowerCase().includes("mercado"));
+            
+            if (hasCash && hasFiserv) {
+              paymentKey = "Mixto";
+            } else if (hasCash && hasPayPal) {
+              paymentKey = "Mixto PayPal";
+            } else if (hasCash && hasShopifyPayments) {
+              paymentKey = "Mixto Tarjeta";
+            } else if (hasCash) {
+              paymentKey = "Efectivo";
+            } else if (hasFiserv) {
+              paymentKey = "Fiserv POS";
+            } else if (hasPayPal) {
+              paymentKey = "PayPal";
+            } else if (hasShopifyPayments) {
+              paymentKey = "Tarjeta";
+            } else if (hasMercadoPago) {
+              paymentKey = "Mercado Pago";
+            } else {
+              paymentKey = "Otros";
+            }
+          }
+          
+          paymentData[paymentKey] = (paymentData[paymentKey] || 0) + orderRevenue;
+        }
+        
+        return Object.entries(paymentData)
+          .sort((a,b) => b[1] - a[1])
+          .slice(0, 4) // Max 4 sistemi per non sovraffollare
+          .map(([method, revenue]) => `
+            <div class="stat-card">
+              <div style="font-size:16px;margin-bottom:4px;">${method}</div>
+              <div class="stat-number">${money(revenue)}</div>
+              <div class="stat-label">Revenue</div>
+            </div>
+          `).join('');
+      })()}
     </div>
 
     <!-- SECCIONES PRINCIPALES DEL REPORTE -->
