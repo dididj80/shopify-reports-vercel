@@ -1757,7 +1757,7 @@ export default async function handler(req, res) {
 
     timing.total = Date.now() - startTime;
 
-    const rateLimiterStats = optimizedRateLimiter.getStats();
+    const rateLimiterStats = rateLimiter.getStats();
     const performanceStats = {
       totalTime: timing.total,
       apiCalls: rateLimiterStats.totalCalls,
