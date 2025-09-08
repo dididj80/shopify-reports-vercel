@@ -1108,7 +1108,7 @@ function renderABCSummary(abcData) {
 
 // Render tabella prodotti venduti
 function renderProductsTable(rows, isEmail = false) {
-  const maxRows = isEmail ? 15 : 50;
+  const maxRows = isEmail ? 15 : 100;
   const displayRows = rows.slice(0, maxRows);
   
   const head = `
