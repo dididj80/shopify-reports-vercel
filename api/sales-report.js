@@ -199,12 +199,26 @@ async function computeRange(period, todayFlag) {
       end = y.endOf("day"); 
     }
   } else if (period === "weekly") {
-    start = now.startOf("week"); 
-    end = now.endOf("week");
+    if (todayFlag) {
+      // Settimana corrente solo se esplicitamente richiesta
+      start = now.startOf("week"); 
+      end = now.endOf("week");
+    } else {
+      // Settimana precedente come default
+      const lastWeek = now.minus({weeks: 1});
+      start = lastWeek.startOf("week"); 
+      end = lastWeek.endOf("week");
+    }
   } else if (period === "monthly") {
-    start = now.startOf("month"); 
-    end = now.endOf("month");
-  }
+    if (todayFlag) {
+      start = now.startOf("month"); 
+      end = now.endOf("month");
+    } else {
+      const lastMonth = now.minus({months: 1});
+      start = lastMonth.startOf("month"); 
+      end = lastMonth.endOf("month");
+    }
+}
   
   return { tz, now, start, end };
 }
