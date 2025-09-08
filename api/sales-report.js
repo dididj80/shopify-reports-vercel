@@ -49,6 +49,12 @@ const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const money = (n) => new Intl.NumberFormat("es-MX",{style:"currency",currency:"MXN"}).format(Number(n||0));
 
+// Helper per calcolare revenue reale (post-descuentos)
+function getOrderRevenue(order) {
+  // Usa il total_price che include già tutti i descuentos aplicados
+  return Number(order.total_price || 0);
+}
+
 // Wrapper per chiamate API con gestione errori
 async function fetchWithHeaders(url) {
   const r = await fetch(url, { headers: { "X-Shopify-Access-Token": TOKEN } });
@@ -246,7 +252,12 @@ async function processProductsComplete(orders, includeAllLocations) {
       };
       
       prev.soldQty += Number(li.quantity || 0);
-      prev.revenue += Number(li.price || 0) * Number(li.quantity || 0);
+      // Calcola la proporzione del line item sul subtotal dell'ordine
+      const orderSubtotal = Number(o.subtotal_price || 0);
+      const lineItemSubtotal = Number(li.price || 0) * Number(li.quantity || 0);
+      const orderRevenue = getOrderRevenue(o);
+      const lineItemRevenue = orderSubtotal > 0 ? (lineItemSubtotal / orderSubtotal) * orderRevenue : 0;
+      prev.revenue += lineItemRevenue;
       byVariant.set(key, prev);
       
       if (li.variant_id) variantIds.add(li.variant_id);
@@ -512,7 +523,7 @@ function donutSVG(parts, size=140) {
 function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   const locStats = locationStatsParam || {};
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
-  const revenue = (o) => o.line_items.reduce((s,li)=>s+(Number(li.price||0)*Number(li.quantity||0)),0);
+  const revenue = (o) => getOrderRevenue(o);
 
   // 1) Canali di vendita per location
   const chObj = {};
@@ -537,7 +548,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
     const orderDate = DateTime.fromISO(o.created_at).setZone("America/Monterrey");
-    const orderRevenue = revenue(o);
+    const orderRevenue = getOrderRevenue(o);
     
     // CASO SPECIALE: Uso Interno (gateway vuoto)
     if (gws.length === 0) {
@@ -717,7 +728,7 @@ function buildEmailHTML(data) {
   const paymentData = {};
   for (const o of orders) {
     const gws = o.payment_gateway_names || [];
-    const orderRevenue = o.line_items.reduce((s,li) => s + (Number(li.price||0) * Number(li.quantity||0)), 0);
+    const orderRevenue = getOrderRevenue(o);
     const orderItems = pieces(o);
     
     let paymentKey;
@@ -1431,7 +1442,7 @@ function buildCompleteHTML(data, isEmail = false) {
         const paymentData = {};
         for (const o of orders) {
           const gws = o.payment_gateway_names || [];
-          const orderRevenue = o.line_items.reduce((s,li) => s + (Number(li.price||0) * Number(li.quantity||0)), 0);
+          const orderRevenue = getOrderRevenue(o);
           
           let paymentKey;
           if (gws.length === 0) {
