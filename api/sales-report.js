@@ -1243,7 +1243,7 @@ function styles(isEmail = false) {
 // ========================================
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
-  const totRev = rows.reduce((s,r)=>s+r.revenue,0);
+  const totRev = orders.reduce((s,o) => s + getOrderRevenue(o), 0);
   
   const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
   
@@ -1759,7 +1759,7 @@ export default async function handler(req, res) {
         const prevOrders = await fetchOrdersPaidInRange(prevStart, prevEnd);
         
         const prevRev = prevOrders.reduce((s,o) => s + getOrderRevenue(o), 0);
-        const totRev = rows.reduce((s,r)=>s+r.revenue,0);
+        const totRev = orders.reduce((s,o) => s + getOrderRevenue(o), 0);
         const revChange = totRev - prevRev;
         const revPercent = prevRev > 0 ? ((revChange / prevRev) * 100) : 0;
         
