@@ -1486,7 +1486,7 @@ function buildEmailHTML(data) {
 function buildCompleteHTML(data, isEmail = false) {
   const { label, tz, now, rows, orders, conversions, comparison, timing, 
           deadStockData, ropRows, abcData, includeAllLocations, locationStats, performanceStats } = data;
-  const totRev = rows.reduce((s,r)=>s+r.revenue,0);
+  const totRev = orders.reduce((s,o) => s + getOrderRevenue(o), 0);
 
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
