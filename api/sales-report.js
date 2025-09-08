@@ -888,6 +888,24 @@ function buildEmailHTML(data) {
         `).join('')}
       </div>
 
+    <!-- PRODUCTOS USO INTERNO -->
+    ${(() => {
+      const usoInternoProducts = rows.filter(r => r.revenue === 0 && r.soldQty > 0);
+      if (usoInternoProducts.length === 0) return '';
+  
+      return `
+      <div class="section">
+        <h3>🏥 Productos Uso Interno (${usoInternoProducts.length})</h3>
+       ${usoInternoProducts.map(p => `
+         <div class="stat-row">
+           <span class="stat-label">${esc(p.productTitle)}${p.variantTitle !== 'Default Title' ? ` - ${esc(p.variantTitle)}` : ''}:</span>
+            <span class="stat-value">${p.soldQty} unidades utilizadas</span>
+          </div>
+       `).join('')}
+      </div>
+      `;
+    })()}
+
       <!-- PRODUCTOS OUT OF STOCK -->
       ${outOfStockProducts.length > 0 ? `
       <div class="alert">
@@ -1056,33 +1074,41 @@ function renderProductsTable(rows, isEmail = false) {
     <th align="right">Stock</th>
   </tr></thead>`;
   
-  const body = displayRows.map((r, idx)=>{
-    const inv = Number(r.inventoryAvailable ?? 0);
-    const rank = idx + 1;
-    let cls = "";
-    
-    let invCell = String(inv);
-    if (inv === 0) {
-      cls = ' class="row-zero"';
-      invCell = `<span style="color:#dc2626;font-weight:bold;">${inv}</span>`;
-    } else if (inv === 1) {
-      cls = ' class="row-one"';
-      invCell = `<span style="color:#f97316;font-weight:bold;">${inv}</span>`;
-    } else {
-      invCell = `<span style="font-weight:600;">${inv}</span>`;
-    }
+const body = displayRows.map((r, idx)=>{
+  const inv = Number(r.inventoryAvailable ?? 0);
+  const rank = idx + 1;
+  let cls = "";
+  let productClass = "";
+  
+  let invCell = String(inv);
+  
+  // Evidenzia prodotti uso interno (revenue = 0 ma quantità > 0)
+  if (r.revenue === 0 && r.soldQty > 0) {
+    cls = ' class="row-uso-interno"';
+    productClass = ' style="color:#0284c7;font-weight:600;"';
+  }
+  // Evidenzia stock critico
+  else if (inv === 0) {
+    cls = ' class="row-zero"';
+    invCell = `<span style="color:#dc2626;font-weight:bold;">${inv}</span>`;
+  } else if (inv === 1) {
+    cls = ' class="row-one"';
+    invCell = `<span style="color:#f97316;font-weight:bold;">${inv}</span>`;
+  } else {
+    invCell = `<span style="font-weight:600;">${inv}</span>`;
+  }
 
-    return `
-      <tr${cls}>
-        <td><span class="muted">${rank}.</span> ${esc(r.productTitle)}</td>
-        <td>${esc(r.variantTitle)}</td>
-        ${!isEmail ? `<td>${esc(r.sku||"")}</td>` : ''}
-        <td align="right">${r.unitPrice!=null?esc(money(r.unitPrice)):""}</td>
-        <td align="right"><strong>${r.soldQty}</strong></td>
-        <td align="right"><strong>${esc(money(r.revenue))}</strong></td>
-        <td align="right">${invCell}</td>
-      </tr>`;
-  }).join("");
+  return `
+    <tr${cls}>
+      <td><span class="muted">${rank}.</span> <span${productClass}>${esc(r.productTitle)}</span></td>
+      <td>${esc(r.variantTitle)}</td>
+      ${!isEmail ? `<td>${esc(r.sku||"")}</td>` : ''}
+      <td align="right">${r.unitPrice!=null?esc(money(r.unitPrice)):""}</td>
+      <td align="right"><strong>${r.soldQty}</strong></td>
+      <td align="right"><strong>${esc(money(r.revenue))}</strong></td>
+      <td align="right">${invCell}</td>
+    </tr>`;
+}).join("");
   
   const moreText = rows.length > maxRows ? `<div style="color:#6b7280;margin-top:8px;">... y ${rows.length - maxRows} productos mas</div>` : '';
   
@@ -1173,6 +1199,8 @@ function styles(isEmail = false) {
     .row-one td{border-color:#fed7aa !important}
     .row-critical{background-color:#fdf2f8 !important}
     .row-critical td{border-color:#f9a8d4 !important}
+    .row-uso-interno{background-color:#f0f9ff !important}
+    .row-uso-interno td{border-color:#0284c7 !important}
     
     /* Pills per urgenza */
     .pill-critical{background:#ec4899;color:white;padding:4px 8px;border-radius:12px;font-weight:600;font-size:11px}
