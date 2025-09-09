@@ -818,7 +818,7 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     } else if (hasFiserv) {
       paymentType = "Fiserv Pos";
     } else if (hasShopifyPayments) {
-      paymentType = "Tarjeta (Shopify)";
+      paymentType = "Tarjeta (Shopify Payments)";
     } else if (hasMercadoPago) {
       paymentType = "Mercado Pago";
     } else if (hasTransferencia) {
@@ -1292,7 +1292,7 @@ function buildEmailHTML(data) {
       } else if (hasFiserv) {
         paymentKey = "Fiserv Pos";
       } else if (hasShopifyPayments) {
-        paymentKey = "Tarjeta (Shopify)";
+        paymentKey = "Tarjeta (Web)";
       } else if (hasMercadoPago) {
         paymentKey = "Mercado Pago";
       } else if (hasTransferencia) {
@@ -1597,7 +1597,7 @@ function buildCompleteHTML(data, isEmail = false) {
             } else if (hasPayPal) {
               paymentKey = "PayPal";
             } else if (hasShopifyPayments) {
-              paymentKey = "Tarjeta";
+              paymentKey = "Tarjeta (Shopify Payments)";
             } else if (hasMercadoPago) {
               paymentKey = "Mercado Pago";
             } else if (hasTransferencia) {
