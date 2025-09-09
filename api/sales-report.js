@@ -799,6 +799,9 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     const hasFiserv = gws.some(g => g.toLowerCase().includes("fiserv"));
     const hasShopifyPayments = gws.some(g => g.toLowerCase().includes("shopify_payments"));
     const hasMercadoPago = gws.some(g => g.toLowerCase().includes("mercado"));
+
+    const hasTransferencia = gws.some(g => g.toLowerCase().includes("transferencia") || g.toLowerCase().includes("transfer"));
+    
     
     let paymentType;
     
@@ -818,6 +821,8 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
       paymentType = "Tarjeta (Shopify)";
     } else if (hasMercadoPago) {
       paymentType = "Mercado Pago";
+    } else if (hasTransferencia) {
+      paymentType = "Transferencia";
     } else {
       paymentType = `Otro (${gws.join(', ')})`;
     }
@@ -1272,7 +1277,8 @@ function buildEmailHTML(data) {
       const hasFiserv = gws.some(g => g.toLowerCase().includes("fiserv"));
       const hasShopifyPayments = gws.some(g => g.toLowerCase().includes("shopify_payments"));
       const hasMercadoPago = gws.some(g => g.toLowerCase().includes("mercado"));
-      
+      const hasTransferencia = gws.some(g => g.toLowerCase().includes("transferencia") || g.toLowerCase().includes("transfer"));
+            
       if (hasCash && hasFiserv) {
         paymentKey = "Mixto (Cash + Fiserv Pos)";
       } else if (hasCash && hasPayPal) {
@@ -1289,6 +1295,8 @@ function buildEmailHTML(data) {
         paymentKey = "Tarjeta (Shopify)";
       } else if (hasMercadoPago) {
         paymentKey = "Mercado Pago";
+      } else if (hasTransferencia) {
+        paymentKey = "Transferencia";
       } else {
         paymentKey = `Otro (${gws.join(', ')})`;
       }
@@ -1574,6 +1582,7 @@ function buildCompleteHTML(data, isEmail = false) {
             const hasPayPal = gws.some(g => g.toLowerCase().includes("paypal"));
             const hasShopifyPayments = gws.some(g => g.toLowerCase().includes("shopify_payments"));
             const hasMercadoPago = gws.some(g => g.toLowerCase().includes("mercado"));
+            const hasTransferencia = gws.some(g => g.toLowerCase().includes("transferencia") || g.toLowerCase().includes("transfer"));
             
             if (hasCash && hasFiserv) {
               paymentKey = "Mixto";
@@ -1591,6 +1600,8 @@ function buildCompleteHTML(data, isEmail = false) {
               paymentKey = "Tarjeta";
             } else if (hasMercadoPago) {
               paymentKey = "Mercado Pago";
+            } else if (hasTransferencia) {
+              paymentKey = "Transferencia";
             } else {
               paymentKey = "Otros";
             }
