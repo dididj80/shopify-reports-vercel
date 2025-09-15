@@ -424,12 +424,6 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   console.log(`Fetching inventory for ${ids.length} items...`);
   
   for (const c of chunk(ids, 50)) {
-
- // INSERISCI QUI IL DEBUG
-    if (c.includes("47215780233413")) {
-      console.log("DEBUG: Neolabma inventory_item_id found in chunk:", c);
-    }
-
     const result = await safeShopifyCall(
       () => shopFetchJson(REST(`/inventory_levels.json?inventory_item_ids=${encodeURIComponent(c.join(","))}`)),
       `fetchInventory chunk ${c.length} items`
@@ -443,16 +437,6 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
     for (const lvl of result.inventory_levels) {
       const key = String(lvl.inventory_item_id);
       const available = Number(lvl.available || 0);
-
-        // INSERISCI QUI IL DEBUG
-      if (key === "47215780233413") {
-        console.log("DEBUG Neolabma inventory level:", {
-          inventory_item_id: key,
-          location_id: lvl.location_id,
-          available: available,
-          includeInactive: includeInactive
-        });
-      }
       
       if (!includeInactive) {
         let location = globalCache.locations?.find(l => l.id === lvl.location_id);
@@ -560,7 +544,8 @@ async function processProductsComplete(orders, includeAllLocations) {
       } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
         r.inventoryAvailable = r._variantFallbackQty;
       } else {
-        r.inventoryAvailable = 0;
+         // FALLBACK: se l'API inventory_levels fallisce, usa inventory_quantity dalla variante
+        r.inventoryAvailable = r._variantFallbackQty || 0;
       }
     }
   }
