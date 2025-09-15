@@ -437,6 +437,16 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
     for (const lvl of result.inventory_levels) {
       const key = String(lvl.inventory_item_id);
       const available = Number(lvl.available || 0);
+
+        // INSERISCI QUI IL DEBUG
+      if (key === "47215780233413") {
+        console.log("DEBUG Neolabma inventory level:", {
+          inventory_item_id: key,
+          location_id: lvl.location_id,
+          available: available,
+          includeInactive: includeInactive
+        });
+      }
       
       if (!includeInactive) {
         let location = globalCache.locations?.find(l => l.id === lvl.location_id);
