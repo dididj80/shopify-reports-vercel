@@ -424,6 +424,12 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   console.log(`Fetching inventory for ${ids.length} items...`);
   
   for (const c of chunk(ids, 50)) {
+
+ // INSERISCI QUI IL DEBUG
+    if (c.includes("47215780233413")) {
+      console.log("DEBUG: Neolabma inventory_item_id found in chunk:", c);
+    }
+
     const result = await safeShopifyCall(
       () => shopFetchJson(REST(`/inventory_levels.json?inventory_item_ids=${encodeURIComponent(c.join(","))}`)),
       `fetchInventory chunk ${c.length} items`
