@@ -385,6 +385,18 @@ async function fetchVariantsByIds(variantIds) {
     
     if (result?.variant) {
       const variant = result.variant;
+
+    // INSERISCI QUI IL DEBUG
+      if (variant.sku === "7506606800783") {
+        console.log("DEBUG Neolabma variant details:", {
+          variant_id: variant.id,
+          inventory_item_id: variant.inventory_item_id,
+          sku: variant.sku,
+          inventory_quantity: variant.inventory_quantity,
+          inventory_management: variant.inventory_management
+        });
+      }
+
       out.set(String(variant.id), {
         inventory_item_id: variant.inventory_item_id,
         inventory_quantity: variant.inventory_quantity,
