@@ -10,10 +10,10 @@
       "maxDuration": 120
     },
     "api/send-sales-email.js": {
-      "maxDuration": 30
+      "maxDuration": 120
     },
     "api/cron/smart-report.js": {
-      "maxDuration": 45
+      "maxDuration": 120
     }
   }
 }
