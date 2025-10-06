@@ -9,10 +9,14 @@ export default async function handler(req, res) {
 
   try {
     const now = new Date();
-    const dayOfWeek = now.getDay(); // 0=domenica, 1=lunedì
-    const dayOfMonth = now.getDate();
+
+    // CALCOLO TIMEZONE ESPLICITO
+    const monterreyTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Monterrey' }));
+    const dayOfWeek = monterreyTime.getDay();
+    const dayOfMonth = monterreyTime.getDate();
     
-    console.log(`🤖 Smart cron started - Day: ${dayOfWeek}, Date: ${dayOfMonth}`);
+    console.log(`🤖 Smart cron started - Day: ${dayOfWeek}, Date: ${dayOfMonth} (Monterrey time)`);
+    console.log(`DEBUG - UTC date: ${now.getDate()}, Monterrey date: ${monterreyTime.getDate()}`);
 
     // Verifica configurazione
     const recipients = process.env.SALES_REPORT_RECIPIENTS?.split(',')?.map(email => email.trim()) || [];
@@ -27,8 +31,8 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!process.env.RESEND_API_KEY) {
-      throw new Error('RESEND_API_KEY non configurata');
+    if (!process.env.MAILGUN_API_KEY) {
+      throw new Error('MAILGUN_API_KEY non configurata');
     }
 
     const results = [];
@@ -85,9 +89,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3) PRIMO DEL MESE: Report mensile
+    // 3) REPORT MENSILE - SOLUZIONE PRINCIPALE (PRIMO DEL MESE)
     if (dayOfMonth === 1) {
-      console.log('📧 Inviando report mensile (1° del mese)...');
+      console.log('📧 Inviando report mensile (1 del mese)...');
       try {
         const monthlyResult = await sendReport({
           period: 'monthly',
@@ -101,6 +105,29 @@ export default async function handler(req, res) {
         results.push({ type: 'monthly', success: false, error: err.message });
       }
     }
+
+    // FALLBACK COMMENTATO - Attiva solo se la soluzione principale non funziona
+    /*
+    // FALLBACK: PRIMO LUNEDI DEL MESE (se la soluzione principale salta)
+    const isFirstWeekOfMonth = dayOfMonth >= 1 && dayOfMonth <= 7;
+    const shouldSendMonthlyFallback = dayOfWeek === 1 && isFirstWeekOfMonth && dayOfMonth !== 1;
+    
+    if (shouldSendMonthlyFallback) {
+      console.log('FALLBACK: Inviando report mensile (primo lunedi del mese)...');
+      try {
+        const monthlyResult = await sendReport({
+          period: 'monthly',
+          recipients,
+          customMessage: 'Report automatico mensile (recupero) - Analisi completa mese precedente',
+          baseUrl
+        });
+        results.push({ type: 'monthly-fallback', ...monthlyResult });
+      } catch (err) {
+        console.error('❌ Monthly fallback failed:', err.message);
+        results.push({ type: 'monthly-fallback', success: false, error: err.message });
+      }
+    }
+    */
 
     // Riepilogo finale
     const successful = results.filter(r => r.success).length;
