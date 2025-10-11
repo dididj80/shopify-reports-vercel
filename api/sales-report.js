@@ -632,27 +632,56 @@ async function getLocationBreakdown(orders) {
 // ============================================
 // Funzione di analisi sconti
 // ============================================
+// ============================================
+// VERSIONE CORRETTA - Funzione di analisi sconti
+// ============================================
 function analyzeDiscounts(orders) {
   let totalDiscounts = 0;
   let ordersWithDiscounts = 0;
   
   for (const order of orders) {
-    const subtotal = Number(order.subtotal_price || 0);
-    const total = Number(order.total_price || 0);
-    
-    // Calcola sconto (funziona sia per codici che manuali)
+    // Calcola sconto dall'ordine
     let orderDiscount = 0;
+
+    // DEBUG - Rimuovi dopo aver trovato il problema
+    console.log(`Order ${order.name}:`, {
+      total_discounts: order.total_discounts,
+      discount_applications: order.discount_applications,
+      subtotal: order.subtotal_price,
+      total: order.total_price
+    });
     
-    // Metodo 1: Usa discount_applications (più accurato)
-    if (order.discount_applications && order.discount_applications.length > 0) {
+    // Metodo 1: Usa total_discounts (campo diretto di Shopify)
+    if (order.total_discounts) {
+      orderDiscount = Number(order.total_discounts || 0);
+    }
+    
+    // Metodo 2: Se total_discounts non è disponibile, usa discount_applications
+    if (orderDiscount === 0 && order.discount_applications && order.discount_applications.length > 0) {
       for (const discount of order.discount_applications) {
-        orderDiscount += Number(discount.value || 0);
+        // IMPORTANTE: usa 'amount' non 'value'
+        // 'value' potrebbe essere la percentuale (es. 10 per 10%)
+        // 'amount' è l'importo effettivo in valuta
+        if (discount.amount) {
+          orderDiscount += Number(discount.amount || 0);
+        } else if (discount.value && discount.value_type === 'fixed_amount') {
+          orderDiscount += Number(discount.value || 0);
+        }
       }
     }
     
-    // Metodo 2: Fallback dalla differenza subtotal-total
-    if (orderDiscount === 0 && subtotal > total) {
-      orderDiscount = subtotal - total;
+    // Metodo 3: Fallback - calcola dalla differenza subtotal vs total
+    if (orderDiscount === 0) {
+      const subtotal = Number(order.subtotal_price || 0);
+      const total = Number(order.total_price || 0);
+      const shipping = Number(order.total_shipping_price_set?.shop_money?.amount || order.shipping_lines?.reduce((s, l) => s + Number(l.price || 0), 0) || 0);
+      const tax = Number(order.total_tax || 0);
+      
+      // Sconto = Subtotal - (Total - Shipping - Tax)
+      const calculated = subtotal - (total - shipping - tax);
+      if (calculated > 0.01) {
+        orderDiscount = calculated;
+      }
     }
     
     if (orderDiscount > 0.01) {
@@ -664,6 +693,8 @@ function analyzeDiscounts(orders) {
   const avgDiscount = ordersWithDiscounts > 0 ? totalDiscounts / ordersWithDiscounts : 0;
   const discountRate = orders.length > 0 ? (ordersWithDiscounts / orders.length) * 100 : 0;
   
+  console.log(`FINAL: Total discounts = ${totalDiscounts}, Orders with discounts = ${ordersWithDiscounts}`);
+
   return {
     totalDiscounts,
     ordersWithDiscounts,
