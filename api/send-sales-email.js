@@ -1,4 +1,4 @@
-// /api/send-sales-email.js - Mailgun email sender
+// /api/send-sales-email.js - Mailgun email sender FIXED
 import FormData from 'form-data';
 import Mailgun from 'mailgun.js';
 
@@ -41,6 +41,8 @@ export default async function handler(req, res) {
       baseUrl = 'https://shopify-reports-vercel.vercel.app';
     }
 
+    console.log('📧 Fetching report data from:', `${baseUrl}/api/sales-report`);
+
     // Fetch report dati email
     const reportUrl = `${baseUrl}/api/sales-report`;
     const params = new URLSearchParams({
@@ -59,7 +61,23 @@ export default async function handler(req, res) {
     }
 
     const reportData = await reportResponse.json();
-    if (!reportData.success) throw new Error(reportData.error || 'Report data error');
+    
+    // 🔥 DEBUG - Verifica struttura
+    console.log('📊 Report data structure:', {
+      success: reportData.success,
+      hasEmail: !!reportData.email,
+      emailKeys: reportData.email ? Object.keys(reportData.email) : 'N/A',
+      hasStats: !!reportData.stats
+    });
+    
+    if (!reportData.success) {
+      throw new Error(reportData.error || 'Report data error');
+    }
+
+    // 🔥 FIX: Verifica che email object esista
+    if (!reportData.email || !reportData.email.html) {
+      throw new Error(`Invalid report structure - missing email.html. Got: ${JSON.stringify(reportData).substring(0, 200)}`);
+    }
 
     // Fetch HTML completo per allegato
     let completeHtml = reportData.email.html;
@@ -75,16 +93,25 @@ export default async function handler(req, res) {
       
       if (completeHtmlResponse.ok) {
         completeHtml = await completeHtmlResponse.text();
+        console.log('✅ Complete HTML fetched successfully');
+      } else {
+        console.warn('⚠️ Complete HTML fetch failed, using email HTML as fallback');
       }
     } catch (e) {
-      // Usa fallback email HTML se complete HTML fallisce
+      console.warn('⚠️ Complete HTML error:', e.message);
     }
 
     // Prepara subject con stats
     const money = (n) =>
       new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(Number(n || 0));
+    
     const { stats } = reportData;
-    const subjectLine = `${reportData.email.subject} - ${stats.totalOrders} ordenes, ${money(stats.totalRevenue)}`;
+    
+    // 🔥 FIX: Usa email.subject direttamente
+    const baseSubject = reportData.email.subject || `Reporte ventas ${period}`;
+    const subjectLine = `${baseSubject}`;
+
+    console.log('📝 Email subject:', subjectLine);
 
     // Aggiungi messaggio custom se presente
     let emailHtml = reportData.email.html;
@@ -103,12 +130,14 @@ export default async function handler(req, res) {
     const isSandbox = /sandbox\.mailgun\.org$/.test(process.env.MAILGUN_DOMAIN);
     const finalRecipients = isSandbox ? [recipients[0]] : (testMode ? [recipients[0]] : recipients);
 
+    console.log('📮 Sending to:', finalRecipients.join(', '));
+
     const msg = await mailgunClient.messages.create(process.env.MAILGUN_DOMAIN, {
       from: fromEmail,
       to: finalRecipients,
       subject: subjectLine,
       html: emailHtml,
-      text: reportData.email.text,
+      text: reportData.email.text || `Reporte ventas ${period}`,
       'h:Reply-To': process.env.REPLY_TO_EMAIL || undefined,
       'o:tag': ['sales-report', period],
       attachment: {
@@ -119,6 +148,8 @@ export default async function handler(req, res) {
     });
 
     if (!msg?.id) throw new Error(`Mailgun response senza ID valido: ${JSON.stringify(msg)}`);
+
+    console.log('✅ Email sent successfully:', msg.id);
 
     return res.status(200).json({
       success: true,
@@ -132,10 +163,11 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    console.error('Mailgun email error:', err);
+    console.error('❌ Mailgun email error:', err);
     return res.status(500).json({
       success: false,
       error: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
       timestamp: new Date().toISOString(),
       provider: 'mailgun',
       config: {
