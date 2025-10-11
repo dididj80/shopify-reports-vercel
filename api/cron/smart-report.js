@@ -52,9 +52,9 @@ export default async function handler(req, res) {
       baseUrl = 'https://shopify-reports-vercel.vercel.app';
     }
 
-    console.log('DEBUG - baseUrl:', baseUrl);
+    /*console.log('DEBUG - baseUrl:', baseUrl);
     console.log('DEBUG - VERCEL_URL env:', process.env.VERCEL_URL);
-    console.log('DEBUG - req.headers.host:', req.headers.host);
+    console.log('DEBUG - req.headers.host:', req.headers.host);*/
     
     // 1) SEMPRE: Report giornaliero (ieri)
     console.log('📧 Inviando report giornaliero...');
@@ -178,9 +178,9 @@ async function sendReport({ period, recipients, today = false, customMessage, ba
 
     // AGGIUNGI QUESTO DEBUG
     const responseText = await response.text();
-    console.log('DEBUG - Response status:', response.status);
+    /*console.log('DEBUG - Response status:', response.status);
     console.log('DEBUG - Response headers:', Object.fromEntries(response.headers));
-    console.log('DEBUG - Response body:', responseText.substring(0, 200));
+    console.log('DEBUG - Response body:', responseText.substring(0, 200));*/
 
     // Poi prova il parse JSON
     let result;
