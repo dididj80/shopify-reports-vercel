@@ -628,6 +628,50 @@ async function getLocationBreakdown(orders) {
   return locationStats;
 }
 
+
+// ============================================
+// Funzione di analisi sconti
+// ============================================
+function analyzeDiscounts(orders) {
+  let totalDiscounts = 0;
+  let ordersWithDiscounts = 0;
+  
+  for (const order of orders) {
+    const subtotal = Number(order.subtotal_price || 0);
+    const total = Number(order.total_price || 0);
+    
+    // Calcola sconto (funziona sia per codici che manuali)
+    let orderDiscount = 0;
+    
+    // Metodo 1: Usa discount_applications (più accurato)
+    if (order.discount_applications && order.discount_applications.length > 0) {
+      for (const discount of order.discount_applications) {
+        orderDiscount += Number(discount.value || 0);
+      }
+    }
+    
+    // Metodo 2: Fallback dalla differenza subtotal-total
+    if (orderDiscount === 0 && subtotal > total) {
+      orderDiscount = subtotal - total;
+    }
+    
+    if (orderDiscount > 0.01) {
+      totalDiscounts += orderDiscount;
+      ordersWithDiscounts++;
+    }
+  }
+  
+  const avgDiscount = ordersWithDiscounts > 0 ? totalDiscounts / ordersWithDiscounts : 0;
+  const discountRate = orders.length > 0 ? (ordersWithDiscounts / orders.length) * 100 : 0;
+  
+  return {
+    totalDiscounts,
+    ordersWithDiscounts,
+    avgDiscount,
+    discountRate
+  };
+}
+
 // ========================================
 // DEAD STOCK DETECTION
 // ========================================
@@ -1263,7 +1307,9 @@ function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
   const totRev = orders.reduce((s,o) => s + getOrderRevenue(o), 0);
   
-  const pieces = (o) => o.line_items.reduce((s,li)=>s+Number(li.quantity||0),0);
+  const pieces = (o) => o.line_items.reduce((s, li) => s + Number(li.quantity || 0), 0);
+  
+  const discountAnalysis = analyzeDiscounts(orders);
   
   // Analisi canali di vendita
   const channelData = {};
@@ -1390,6 +1436,25 @@ function buildEmailHTML(data) {
           <span class="stat-value">${money(totRev/orders.length || 0)}</span>
         </div>
       </div>
+
+       <!-- SEZIONE SCONTI -->
+      ${discountAnalysis.totalDiscounts > 10 ? `
+      <div class="section" style="background:#fef3c7;border:1px solid #fde68a;">
+        <h3>💰 Descuentos Aplicados</h3>
+        <div class="stat-row">
+          <span class="stat-label">Total descuentos:</span>
+          <span class="stat-value" style="color:#dc2626;">${money(discountAnalysis.totalDiscounts)}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Órdenes con descuento:</span>
+          <span class="stat-value">${discountAnalysis.ordersWithDiscounts} de ${orders.length} (${discountAnalysis.discountRate.toFixed(1)}%)</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Descuento promedio:</span>
+          <span class="stat-value">${money(discountAnalysis.avgDiscount)}</span>
+        </div>
+      </div>
+      ` : ''}
 
       <!-- CANALES DE VENTA -->
       <div class="section">
@@ -1528,6 +1593,7 @@ function buildCompleteHTML(data, isEmail = false) {
   const inventoryNote = data.includeAllLocations ? 
     ' (Inventario GLOBAL - todas las locations)' : 
     ' (Solo locations activas)';
+  const discountAnalysis = analyzeDiscounts(orders);
 
   return `<!doctype html>
 <html lang="es">
@@ -1576,7 +1642,18 @@ function buildCompleteHTML(data, isEmail = false) {
         <div class="stat-number" style="color:#dc2626;">${rows.filter(r=>Number(r.inventoryAvailable||0)<=1).length}</div>
         <div class="stat-label">Stock crítico</div>
       </div>
-    </div>
+
+        <!-- 🆕 AGGIUNGI QUI LA CARD SCONTI - PRIMA DELLA CHIUSURA stats-grid -->
+      ${discountAnalysis.totalDiscounts > 10 ? `
+      <div class="stat-card" style="background:#fef3c7;border:1px solid #fde68a;">
+        <div style="font-size:20px;margin-bottom:4px;">💰</div>
+        <div class="stat-number" style="color:#dc2626;">${money(discountAnalysis.totalDiscounts)}</div>
+        <div class="stat-label">Total Descuentos</div>
+        <div class="muted">${discountAnalysis.ordersWithDiscounts} órdenes (${discountAnalysis.discountRate.toFixed(1)}%)</div>
+        <div class="muted">Promedio: ${money(discountAnalysis.avgDiscount)}</div>
+      </div>
+      ` : ''}
+    </div>  <!-- Fine stats-grid -->
 
       <!-- CARD SISTEMI DI PAGAMENTO DINAMICHE -->
       ${(() => {
@@ -1809,8 +1886,10 @@ export default async function handler(req, res) {
 
     const label = period==="daily" ? `${today ? "Hoy" : "Ayer"} ${start.toFormat("dd LLL yyyy")}` :
                   period==="weekly" ? `Semana ${start.toFormat("dd LLL")} - ${end.toFormat("dd LLL yyyy")}` :
-                  `${start.toFormat("LLLL yyyy")}`;
-
+        `${start.toFormat("LLLL yyyy")}`;
+    
+    const discountAnalysis = analyzeDiscounts(orders);
+    
     const reportData = {
       success: true,
       label, tz, now, rows, orders, conversions, comparison, timing, 
@@ -1818,8 +1897,9 @@ export default async function handler(req, res) {
       includeAllLocations: includeAllLocations,
       stats: {
         totalProducts: rows.length,
-        totalRevenue: rows.reduce((s,r)=>s+r.revenue,0),
-        totalOrders: orders.length
+        totalRevenue: orders.reduce((s,o) => s + getOrderRevenue(o), 0),
+        totalOrders: orders.length,
+        totalDiscounts: discountAnalysis.totalDiscounts
       }
     };
 
