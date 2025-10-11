@@ -386,17 +386,6 @@ async function fetchVariantsByIds(variantIds) {
     if (result?.variant) {
       const variant = result.variant;
 
-    // INSERISCI QUI IL DEBUG
-      if (variant.sku === "7506606800783") {
-        console.log("DEBUG Neolabma variant details:", {
-          variant_id: variant.id,
-          inventory_item_id: variant.inventory_item_id,
-          sku: variant.sku,
-          inventory_quantity: variant.inventory_quantity,
-          inventory_management: variant.inventory_management
-        });
-      }
-
       out.set(String(variant.id), {
         inventory_item_id: variant.inventory_item_id,
         inventory_quantity: variant.inventory_quantity,
@@ -642,14 +631,6 @@ function analyzeDiscounts(orders) {
   for (const order of orders) {
     // Calcola sconto dall'ordine
     let orderDiscount = 0;
-
-    // DEBUG - Rimuovi dopo aver trovato il problema
-    console.log(`Order ${order.name}:`, {
-      total_discounts: order.total_discounts,
-      discount_applications: order.discount_applications,
-      subtotal: order.subtotal_price,
-      total: order.total_price
-    });
     
     // Metodo 1: Usa total_discounts (campo diretto di Shopify)
     if (order.total_discounts) {
@@ -693,8 +674,6 @@ function analyzeDiscounts(orders) {
   const avgDiscount = ordersWithDiscounts > 0 ? totalDiscounts / ordersWithDiscounts : 0;
   const discountRate = orders.length > 0 ? (ordersWithDiscounts / orders.length) * 100 : 0;
   
-  console.log(`FINAL: Total discounts = ${totalDiscounts}, Orders with discounts = ${ordersWithDiscounts}`);
-
   return {
     totalDiscounts,
     ordersWithDiscounts,
