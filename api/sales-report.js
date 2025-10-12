@@ -624,46 +624,39 @@ async function getLocationBreakdown(orders) {
 // ============================================
 // VERSIONE CORRETTA - Funzione di analisi sconti
 // ============================================
+// SOSTITUISCI la funzione analyzeDiscounts() in sales-report.js
+
 function analyzeDiscounts(orders) {
   let totalDiscounts = 0;
   let ordersWithDiscounts = 0;
   
   for (const order of orders) {
-    // Calcola sconto dall'ordine
     let orderDiscount = 0;
     
     // Metodo 1: Usa total_discounts (campo diretto di Shopify)
-    if (order.total_discounts) {
-      orderDiscount = Number(order.total_discounts || 0);
+    // Questo è il modo più affidabile
+    if (order.total_discounts && Number(order.total_discounts) > 0) {
+      orderDiscount = Number(order.total_discounts);
     }
     
-    // Metodo 2: Se total_discounts non è disponibile, usa discount_applications
-    if (orderDiscount === 0 && order.discount_applications && order.discount_applications.length > 0) {
+    // Metodo 2: Se total_discounts è zero o mancante, usa discount_applications
+    else if (order.discount_applications && order.discount_applications.length > 0) {
       for (const discount of order.discount_applications) {
-        // IMPORTANTE: usa 'amount' non 'value'
-        // 'value' potrebbe essere la percentuale (es. 10 per 10%)
-        // 'amount' è l'importo effettivo in valuta
-        if (discount.amount) {
-          orderDiscount += Number(discount.amount || 0);
-        } else if (discount.value && discount.value_type === 'fixed_amount') {
+        // Usa 'value' quando è disponibile (è l'importo reale dello sconto)
+        if (discount.value) {
           orderDiscount += Number(discount.value || 0);
+        }
+        // Fallback su 'amount' se value non c'è
+        else if (discount.amount) {
+          orderDiscount += Number(discount.amount || 0);
         }
       }
     }
     
-    // Metodo 3: Fallback - calcola dalla differenza subtotal vs total
-    if (orderDiscount === 0) {
-      const subtotal = Number(order.subtotal_price || 0);
-      const total = Number(order.total_price || 0);
-      const shipping = Number(order.total_shipping_price_set?.shop_money?.amount || order.shipping_lines?.reduce((s, l) => s + Number(l.price || 0), 0) || 0);
-      const tax = Number(order.total_tax || 0);
-      
-      // Sconto = Subtotal - (Total - Shipping - Tax)
-      const calculated = subtotal - (total - shipping - tax);
-      if (calculated > 0.01) {
-        orderDiscount = calculated;
-      }
-    }
+    // 🚫 RIMUOVIAMO il Metodo 3 (fallback con calcolo matematico)
+    // Non funziona con tax-inclusive pricing di Shopify
+    // Se total_discounts e discount_applications sono entrambi zero,
+    // significa che NON ci sono sconti reali
     
     if (orderDiscount > 0.01) {
       totalDiscounts += orderDiscount;
