@@ -1,4 +1,4 @@
-// /lib/shopify-graphql.js - GraphQL API Implementation
+// /api/shopify-graphql.js - GraphQL API Implementation
 // Questa libreria implementa le stesse funzionalità di REST ma usando GraphQL
 
 const SHOP = process.env.SHOPIFY_SHOP;
@@ -102,7 +102,10 @@ async function fetchVariantsInventoryGraphQL(variantIds, includeInactive = false
             inventoryLevels(first: 50) {
               edges {
                 node {
-                  available
+                  quantities(names: ["available"]) {
+                    quantity
+                    name
+                  }
                   location {
                     id
                     legacyResourceId
@@ -133,13 +136,17 @@ async function fetchVariantsInventoryGraphQL(variantIds, includeInactive = false
     if (node.inventoryItem?.inventoryLevels) {
       for (const edge of node.inventoryItem.inventoryLevels.edges) {
         const location = edge.node.location;
-        const available = Number(edge.node.available || 0);
-
+        
         // Filtra per location attive se richiesto
         if (!includeInactive && !location.isActive) {
           continue;
         }
 
+        // Estrai quantità disponibile dal nuovo formato
+        const quantities = edge.node.quantities || [];
+        const availableQty = quantities.find(q => q.name === "available");
+        const available = Number(availableQty?.quantity || 0);
+        
         totalInventory += available;
       }
     }
