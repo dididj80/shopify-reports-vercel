@@ -523,16 +523,6 @@ async function processProductsComplete(orders, includeAllLocations) {
   
   const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
   
-  // ✅ LOG DEBUG: Trova Vastionin PRIMA di fetchVariantsByIds
-  const vastioninBefore = rows.find(r => r.productTitle.toLowerCase().includes('vastionin'));
-  if (vastioninBefore) {
-    console.log('🔍 VASTIONIN BEFORE fetchVariantsByIds:', JSON.stringify({
-      variantId: vastioninBefore.variantId,
-      inventory_item_id: vastioninBefore.inventory_item_id,
-      inventoryAvailable: vastioninBefore.inventoryAvailable
-    }));
-  }
-
   if (variantIds.size > 0) {
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     
@@ -543,43 +533,40 @@ async function processProductsComplete(orders, includeAllLocations) {
         r._variantFallbackQty = info.inventory_quantity;
         r._variantMgmt = info.inventory_management;
         r.compare_at_price = info.compare_at_price;
-
-        // ✅ LOG DEBUG: Vastionin dopo fetchVariantsByIds
-        if (r.productTitle.toLowerCase().includes('vastionin')) {
-          console.log('🔍 VASTIONIN AFTER fetchVariantsByIds:', JSON.stringify({
-            variantId: r.variantId,
-            inventory_item_id: r.inventory_item_id,
-            _variantFallbackQty: r._variantFallbackQty,
-            _variantMgmt: r._variantMgmt
-          }));
-        }
       }
-    } // ✅ CHIUDE IL FOR (const r of rows)
-  } // ✅ CHIUDE L'IF (variantIds.size > 0)
+    }
+  }
 
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
-    // ✅ LOG DEBUG: Cosa c'è in invLevels per Vastionin
-    const vastioninRow = rows.find(r => r.productTitle.toLowerCase().includes('vastionin'));
-    if (vastioninRow) {
-      const vastioninItemId = String(vastioninRow.inventory_item_id);
-      console.log('🔍 VASTIONIN invLevels lookup:', JSON.stringify({
-        inventory_item_id: vastioninItemId,
-        valueInInvLevels: invLevels[vastioninItemId],
-        totalInvLevelsKeys: Object.keys(invLevels).length
-      }));
-    }
-
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
+      
+      // ✅ NUOVA LOGICA: Confronta invLevels con fallback per rilevare dati incompleti
       if (iid && invLevels[iid] != null) {
-        r.inventoryAvailable = invLevels[iid];
+        const apiStock = invLevels[iid];
+        const fallbackStock = r._variantFallbackQty || 0;
+        
+        // Se c'è una discrepanza significativa (>20%), probabilmente l'API ha dato dati parziali
+        const discrepancy = Math.abs(apiStock - fallbackStock);
+        const percentDiff = fallbackStock > 0 ? (discrepancy / fallbackStock) * 100 : 0;
+        
+        // Usa il valore più alto se la differenza è >20%
+        if (percentDiff > 20 && fallbackStock > apiStock) {
+          // API inventory_levels è probabilmente incompleta (chunk falliti, location mancanti, etc)
+          r.inventoryAvailable = fallbackStock;
+          console.log(`⚠️ Using fallback for ${r.productTitle}: API=${apiStock}, Fallback=${fallbackStock} (${percentDiff.toFixed(0)}% diff)`);
+        } else {
+          // API sembra affidabile, usala
+          r.inventoryAvailable = apiStock;
+        }
       } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
+        // Prodotto gestito manualmente, usa sempre il fallback
         r.inventoryAvailable = r._variantFallbackQty;
       } else {
-        // FALLBACK: se l'API inventory_levels fallisce, usa inventory_quantity dalla variante
+        // Nessun dato API disponibile, usa il fallback
         r.inventoryAvailable = r._variantFallbackQty || 0;
       }
 
@@ -587,13 +574,15 @@ async function processProductsComplete(orders, includeAllLocations) {
       if (r.productTitle.toLowerCase().includes('vastionin')) {
         console.log('🔍 VASTIONIN FINAL INVENTORY:', JSON.stringify({
           inventoryAvailable: r.inventoryAvailable,
-          usedFallback: invLevels[iid] == null,
-          _variantFallbackQty: r._variantFallbackQty,
-          _variantMgmt: r._variantMgmt
+          apiValue: invLevels[iid],
+          fallbackValue: r._variantFallbackQty,
+          percentDiff: invLevels[iid] && r._variantFallbackQty ? 
+            Math.abs((invLevels[iid] - r._variantFallbackQty) / r._variantFallbackQty * 100).toFixed(1) + '%' : 'N/A',
+          usedFallback: invLevels[iid] != null && r.inventoryAvailable === r._variantFallbackQty
         }));
       }
-    } // ✅ CHIUDE IL FOR (const r of rows) - SECONDO LOOP
-  } // ✅ CHIUDE L'IF (itemIds.length > 0)
+    }
+  }
     
   return { rows, variantIds: [...variantIds] };
 }
