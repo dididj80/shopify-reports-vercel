@@ -9,6 +9,9 @@
     "api/sales-report.js": {
       "maxDuration": 120
     },
+    "api/sales-report-graphql.js": {
+      "maxDuration": 120
+    },
     "api/send-sales-email.js": {
       "maxDuration": 120
     },
