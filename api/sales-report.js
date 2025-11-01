@@ -523,6 +523,16 @@ async function processProductsComplete(orders, includeAllLocations) {
   
   const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
   
+  // ✅ LOG DEBUG: Trova Vastionin PRIMA di fetchVariantsByIds
+  const vastioninBefore = rows.find(r => r.productTitle.toLowerCase().includes('vastionin'));
+  if (vastioninBefore) {
+    console.log('🔍 VASTIONIN BEFORE fetchVariantsByIds:', JSON.stringify({
+      variantId: vastioninBefore.variantId,
+      inventory_item_id: vastioninBefore.inventory_item_id,
+      inventoryAvailable: vastioninBefore.inventoryAvailable
+    }));
+  }
+
   if (variantIds.size > 0) {
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     
@@ -533,6 +543,16 @@ async function processProductsComplete(orders, includeAllLocations) {
         r._variantFallbackQty = info.inventory_quantity;
         r._variantMgmt = info.inventory_management;
         r.compare_at_price = info.compare_at_price;
+
+        // ✅ LOG DEBUG: Vastionin dopo fetchVariantsByIds
+        if (r.productTitle.toLowerCase().includes('vastionin')) {
+          console.log('🔍 VASTIONIN AFTER fetchVariantsByIds:', JSON.stringify({
+            variantId: r.variantId,
+            inventory_item_id: r.inventory_item_id,
+            _variantFallbackQty: r._variantFallbackQty,
+            _variantMgmt: r._variantMgmt
+          }));
+
       }
     }
   }
@@ -541,6 +561,17 @@ async function processProductsComplete(orders, includeAllLocations) {
   if (itemIds.length > 0) {
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
+   // ✅ LOG DEBUG: Cosa c'è in invLevels per Vastionin
+    const vastioninRow = rows.find(r => r.productTitle.toLowerCase().includes('vastionin'));
+    if (vastioninRow) {
+      const vastioninItemId = String(vastioninRow.inventory_item_id);
+      console.log('🔍 VASTIONIN invLevels lookup:', JSON.stringify({
+        inventory_item_id: vastioninItemId,
+        valueInInvLevels: invLevels[vastioninItemId],
+        totalInvLevelsKeys: Object.keys(invLevels).length
+      }));
+    }
+
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
       if (iid && invLevels[iid] != null) {
@@ -551,6 +582,16 @@ async function processProductsComplete(orders, includeAllLocations) {
          // FALLBACK: se l'API inventory_levels fallisce, usa inventory_quantity dalla variante
         r.inventoryAvailable = r._variantFallbackQty || 0;
       }
+
+      // ✅ LOG DEBUG FINALE per Vastionin
+      if (r.productTitle.toLowerCase().includes('vastionin')) {
+        console.log('🔍 VASTIONIN FINAL INVENTORY:', JSON.stringify({
+          inventoryAvailable: r.inventoryAvailable,
+          usedFallback: invLevels[iid] == null,
+          _variantFallbackQty: r._variantFallbackQty,
+          _variantMgmt: r._variantMgmt
+        }));
+
     }
   }
     
