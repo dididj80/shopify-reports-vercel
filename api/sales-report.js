@@ -569,18 +569,6 @@ async function processProductsComplete(orders, includeAllLocations) {
         // Nessun dato API disponibile, usa il fallback
         r.inventoryAvailable = r._variantFallbackQty || 0;
       }
-
-      // ✅ LOG DEBUG FINALE per Vastionin
-      if (r.productTitle.toLowerCase().includes('vastionin')) {
-        console.log('🔍 VASTIONIN FINAL INVENTORY:', JSON.stringify({
-          inventoryAvailable: r.inventoryAvailable,
-          apiValue: invLevels[iid],
-          fallbackValue: r._variantFallbackQty,
-          percentDiff: invLevels[iid] && r._variantFallbackQty ? 
-            Math.abs((invLevels[iid] - r._variantFallbackQty) / r._variantFallbackQty * 100).toFixed(1) + '%' : 'N/A',
-          usedFallback: invLevels[iid] != null && r.inventoryAvailable === r._variantFallbackQty
-        }));
-      }
     }
   }
     
