@@ -5,7 +5,7 @@ import { DateTime } from "luxon";
 import { 
   fetchVariantsInventoryGraphQL,
   testConnection 
-} from '../lib/shopify-graphql.js';
+} from './shopify-graphql.js';
 
 // ========================================
 // IMPORTA LE FUNZIONI COMUNI DA REST
