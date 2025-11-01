@@ -413,12 +413,26 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
   console.log(`Fetching inventory for ${ids.length} items...`);
   
   for (const c of chunk(ids, 50)) {
+    // ✅ AGGIUNGI RETRY CON safeShopifyCall invece di chiamata diretta
     const result = await safeShopifyCall(
       () => shopFetchJson(REST(`/inventory_levels.json?inventory_item_ids=${encodeURIComponent(c.join(","))}`)),
-      `fetchInventory chunk ${c.length} items`
+      `fetchInventory chunk ${c.length} items`,
+      3  // ✅ 3 retry invece di 2
     );
     
     if (!result?.inventory_levels) {
+      console.error(`❌ CRITICAL: Failed to fetch inventory for chunk after retries. Items affected: ${c.length}`);
+      
+      // ✅ FALLBACK: Se fallisce dopo i retry, usa fetchVariantsByIds per recuperare i dati
+      const fallbackVariants = await fetchVariantsByIds(c);
+      for (const [variantId, variantData] of fallbackVariants.entries()) {
+        const itemId = String(variantData.inventory_item_id);
+        if (itemId && variantData.inventory_quantity != null) {
+          res[itemId] = Number(variantData.inventory_quantity);
+          console.log(`✅ Fallback inventory for item ${itemId}: ${res[itemId]}`);
+        }
+      }
+      
       failCount++;
       continue;
     }
@@ -432,7 +446,8 @@ async function fetchInventoryLevelsForItems(itemIds, includeInactive = false) {
         if (!location) {
           const locationResult = await safeShopifyCall(
             () => shopFetchJson(REST(`/locations/${lvl.location_id}.json`)),
-            `fetchLocation ${lvl.location_id}`
+            `fetchLocation ${lvl.location_id}`,
+            2
           );
           
           if (locationResult?.location) {
