@@ -552,16 +552,16 @@ async function processProductsComplete(orders, includeAllLocations) {
             _variantFallbackQty: r._variantFallbackQty,
             _variantMgmt: r._variantMgmt
           }));
-
+        }
       }
-    }
-  }
+    } // ✅ CHIUDE IL FOR (const r of rows)
+  } // ✅ CHIUDE L'IF (variantIds.size > 0)
 
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
     
-   // ✅ LOG DEBUG: Cosa c'è in invLevels per Vastionin
+    // ✅ LOG DEBUG: Cosa c'è in invLevels per Vastionin
     const vastioninRow = rows.find(r => r.productTitle.toLowerCase().includes('vastionin'));
     if (vastioninRow) {
       const vastioninItemId = String(vastioninRow.inventory_item_id);
@@ -579,7 +579,7 @@ async function processProductsComplete(orders, includeAllLocations) {
       } else if (r._variantMgmt !== "shopify" && r._variantFallbackQty != null) {
         r.inventoryAvailable = r._variantFallbackQty;
       } else {
-         // FALLBACK: se l'API inventory_levels fallisce, usa inventory_quantity dalla variante
+        // FALLBACK: se l'API inventory_levels fallisce, usa inventory_quantity dalla variante
         r.inventoryAvailable = r._variantFallbackQty || 0;
       }
 
@@ -591,9 +591,9 @@ async function processProductsComplete(orders, includeAllLocations) {
           _variantFallbackQty: r._variantFallbackQty,
           _variantMgmt: r._variantMgmt
         }));
-
-    }
-  }
+      }
+    } // ✅ CHIUDE IL FOR (const r of rows) - SECONDO LOOP
+  } // ✅ CHIUDE L'IF (itemIds.length > 0)
     
   return { rows, variantIds: [...variantIds] };
 }
