@@ -1,5 +1,6 @@
 // /api/sales-report.js - FILE 1/6: CONFIGURAZIONE E CACHE
 import { DateTime } from "luxon";
+import { fetchVariantsInventoryGraphQL } from './shopify-graphql.js';
 
 // ========================================
 // SISTEMA DI CACHE IN-MEMORY
@@ -523,6 +524,57 @@ async function processProductsComplete(orders, includeAllLocations) {
   
   const rows = Array.from(byVariant.values()).sort((a,b) => b.soldQty - a.soldQty || b.revenue - a.revenue);
   
+  // ========================================
+  // 🆕 FEATURE FLAG: GraphQL vs REST
+  // ========================================
+  const USE_GRAPHQL = process.env.USE_GRAPHQL === 'true';
+
+  if (USE_GRAPHQL && variantIds.size > 0) {
+    // ========================================
+    // 🚀 METODO GRAPHQL (NUOVO)
+    // ========================================
+    console.log(`🚀 Using GraphQL for ${variantIds.size} variants (feature flag enabled)`);
+    const graphqlStart = Date.now();
+    
+    try {
+      const variantInfo = await fetchVariantsInventoryGraphQL([...variantIds], includeAllLocations);
+      
+      for (const r of rows) {
+        const info = r.variantId ? variantInfo.get(String(r.variantId)) : null;
+        if (info) {
+          r.inventory_item_id = info.inventory_item_id;
+          r.inventoryAvailable = info.inventoryAvailable;
+          r._variantFallbackQty = info._variantFallbackQty;
+          r._variantMgmt = info._variantMgmt;
+          r.compare_at_price = info.compare_at_price;
+          r._method = 'GraphQL';
+        }
+      }
+      
+      console.log(`✅ GraphQL completed in ${Date.now() - graphqlStart}ms`);
+      
+    } catch (err) {
+      console.error('❌ GraphQL failed, falling back to REST:', err.message);
+      // Se GraphQL fallisce, usa REST come fallback
+      await processWithREST(rows, variantIds, includeAllLocations);
+    }
+    
+  } else {
+    // ========================================
+    // 📡 METODO REST (DEFAULT - ATTUALE)
+    // ========================================
+    console.log(`📡 Using REST API for inventory (${USE_GRAPHQL ? 'GraphQL disabled' : 'default mode'})`);
+    await processWithREST(rows, variantIds, includeAllLocations);
+  }
+    
+  return { rows, variantIds: [...variantIds] };
+}
+
+// ========================================
+// HELPER: Process con REST (codice attuale)
+// ========================================
+async function processWithREST(rows, variantIds, includeAllLocations) {
+  // Fetch variant info
   if (variantIds.size > 0) {
     const variantInfo = await fetchVariantsByIds([...variantIds]);
     
@@ -537,6 +589,7 @@ async function processProductsComplete(orders, includeAllLocations) {
     }
   }
 
+  // Fetch inventory levels
   const itemIds = rows.map(r=>r.inventory_item_id).filter(Boolean);
   if (itemIds.length > 0) {
     const invLevels = await fetchInventoryLevelsForItems(itemIds, includeAllLocations);
@@ -544,7 +597,7 @@ async function processProductsComplete(orders, includeAllLocations) {
     for (const r of rows) {
       const iid = r.inventory_item_id ? String(r.inventory_item_id) : null;
       
-      // ✅ NUOVA LOGICA: Confronta invLevels con fallback per rilevare dati incompleti
+      // ✅ LOGICA CON FALLBACK (già implementata)
       if (iid && invLevels[iid] != null) {
         const apiStock = invLevels[iid];
         const fallbackStock = r._variantFallbackQty || 0;
@@ -555,7 +608,7 @@ async function processProductsComplete(orders, includeAllLocations) {
         
         // Usa il valore più alto se la differenza è >20%
         if (percentDiff > 20 && fallbackStock > apiStock) {
-          // API inventory_levels è probabilmente incompleta (chunk falliti, location mancanti, etc)
+          // API inventory_levels è probabilmente incompleta
           r.inventoryAvailable = fallbackStock;
           console.log(`⚠️ Using fallback for ${r.productTitle}: API=${apiStock}, Fallback=${fallbackStock} (${percentDiff.toFixed(0)}% diff)`);
         } else {
@@ -569,10 +622,10 @@ async function processProductsComplete(orders, includeAllLocations) {
         // Nessun dato API disponibile, usa il fallback
         r.inventoryAvailable = r._variantFallbackQty || 0;
       }
+      
+      r._method = 'REST';
     }
   }
-    
-  return { rows, variantIds: [...variantIds] };
 }
 
 // ========================================
