@@ -1662,7 +1662,7 @@ function buildEmailHTML(data) {
     </div>
 
     <div class="footer">
-      Reporte automático | Performance: ${timing?.total || 0}ms | Versión: 2.1
+      Reporte automático | [${USE_GRAPHQL ? 'GraphQL ⚡' : 'REST 🔵'}] | Performance: ${timing?.total || 0}ms | Versión: 2.1
     </div>
   </div>
 </body>
