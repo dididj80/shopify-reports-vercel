@@ -1394,7 +1394,8 @@ function styles(isEmail = false) {
 // ========================================
 function buildEmailHTML(data) {
   const { label, tz, now, rows, orders, timing, locationStats } = data;
-  const totRev = orders.reduce((s,o) => s + getOrderRevenue(o), 0);
+  const totRev = orders.reduce((s, o) => s + getOrderRevenue(o), 0);
+  const USE_GRAPHQL = process.env.USE_GRAPHQL === 'true';
   
   const pieces = (o) => o.line_items.reduce((s, li) => s + Number(li.quantity || 0), 0);
   
@@ -1675,7 +1676,8 @@ function buildEmailHTML(data) {
 function buildCompleteHTML(data, isEmail = false) {
   const { label, tz, now, rows, orders, conversions, comparison, timing, 
           deadStockData, ropRows, abcData, includeAllLocations, locationStats, performanceStats } = data;
-  const totRev = orders.reduce((s,o) => s + getOrderRevenue(o), 0);
+  const totRev = orders.reduce((s, o) => s + getOrderRevenue(o), 0);
+  const USE_GRAPHQL = process.env.USE_GRAPHQL === 'true';
 
   const isEmailMode = isEmail;
   const headerStyle = isEmailMode ? 'background:#2563eb;color:white;padding:20px;margin:-16px -16px 24px;' : '';
