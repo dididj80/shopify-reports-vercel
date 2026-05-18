@@ -843,9 +843,13 @@ function computeROP({sales30d, onHand, leadDays, safetyDays}) {
 
 function computeABCAnalysis(rows) {
   const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  if (totalRevenue === 0) 
+    return rows.map(r => ({ ...r, rank: 1, revenuePercent: '0.0', cumulativePercent: '0.0', abcCategory: 'C' }));
+
+  const sorted = [...rows].sort((a, b) => b.revenue - a.revenue);
   let cumulativeRevenue = 0;
   
-  return rows.map((r, index) => {
+  return sorted.map((r, index) => {
     cumulativeRevenue += r.revenue;
     const cumulativePercent = (cumulativeRevenue / totalRevenue) * 100;
     
@@ -1240,6 +1244,7 @@ function renderProductsTable(rows, isEmail = false) {
     <th align="left">Producto</th>
     <th align="left">Variante</th>
     ${!isEmail ? '<th align="left">SKU</th>' : ''}
+    ${!isEmail ? '<th align="center">ABC</th>' : ''}
     <th align="right">Precio</th>
     <th align="right">Vendidas</th>
     <th align="right">Ingresos</th>
@@ -1273,6 +1278,11 @@ function renderProductsTable(rows, isEmail = false) {
         <td><span class="muted">${rank}.</span> <span${productClass}>${esc(r.productTitle)}</span></td>
         <td>${esc(r.variantTitle)}</td>
         ${!isEmail ? `<td>${esc(r.sku||"")}</td>` : ''}
+        ${!isEmail ? `<td align="center">${
+          r.abcCategory === 'A' ? '<span style="background:#dc2626;color:white;padding:2px 8px;border-radius:10px;font-weight:600;font-size:11px;">A</span>' :
+          r.abcCategory === 'B' ? '<span style="background:#f97316;color:white;padding:2px 8px;border-radius:10px;font-weight:600;font-size:11px;">B</span>' :
+                          '<span style="background:#6b7280;color:white;padding:2px 8px;border-radius:10px;font-weight:600;font-size:11px;">C</span>'
+        }</td>` : ''}
         <td align="right">${r.unitPrice!=null?esc(money(r.unitPrice)):""}</td>
         <td align="right"><strong>${r.soldQty}</strong></td>
         <td align="right"><strong>${esc(money(r.revenue))}</strong></td>
@@ -1942,6 +1952,12 @@ export default async function handler(req, res) {
     });
 
     const abcData = computeABCAnalysis(rows);
+
+    // Propaga abcCategory back sui rows per la tabella prodotti
+    const abcByKey = new Map(abcData.map(r => [r.variantId ?? `SKU:${r.sku||r.productTitle}`, r.abcCategory]));
+    for (const r of rows) {
+      r.abcCategory = abcByKey.get(r.variantId ?? `SKU:${r.sku||r.productTitle}`) || 'C';
+    }
     
     let comparison = null;
     if (period !== 'monthly') {
