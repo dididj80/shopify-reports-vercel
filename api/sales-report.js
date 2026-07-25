@@ -173,6 +173,15 @@ const REST = (p, ver = "2024-07") => `https://${SHOP}/admin/api/${ver}${p}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const money = (n) => new Intl.NumberFormat("es-MX",{style:"currency",currency:"MXN"}).format(Number(n||0));
 
+const CHANNEL_DISPLAY_NAMES = {
+  "web": "Web",
+  "pos": "POS",
+  "3890849": "Shop App",
+};
+function displayChannel(channel) {
+  return CHANNEL_DISPLAY_NAMES[channel] || (channel.charAt(0).toUpperCase() + channel.slice(1));
+}
+
 // Helper per calcolare revenue reale (post-descuentos)
 function getOrderRevenue(order) {
   return Number(order.total_price || 0);
@@ -650,7 +659,8 @@ function calculateConversions(orders) {
     const aov = stats.orders > 0 ? (stats.revenue / stats.orders) : 0;
     
     return {
-      channel: channel.charAt(0).toUpperCase() + channel.slice(1),
+      //channel: channel.charAt(0).toUpperCase() + channel.slice(1),
+      channel: displayChannel(channel),
       orders: stats.orders,
       revenue: stats.revenue,
       conversionRate: parseFloat(conversionRate),
@@ -926,7 +936,8 @@ function chartsHTML(orders, isEmail = false, locationStatsParam = null) {
     }
   } else {
     for (const o of orders) {
-      const ch = (o.source_name || "unknown").toLowerCase();
+      //const ch = (o.source_name || "unknown").toLowerCase();
+      const ch = displayChannel((o.source_name || "unknown").toLowerCase());
       chObj[ch] = (chObj[ch]||0) + pieces(o);
     }
   }
@@ -1414,7 +1425,8 @@ function buildEmailHTML(data) {
   // Analisi canali di vendita
   const channelData = {};
   for (const o of orders) {
-    const ch = (o.source_name || "unknown").toLowerCase();
+    //const ch = (o.source_name || "unknown").toLowerCase();
+    const ch = displayChannel((o.source_name || "unknown").toLowerCase());
     channelData[ch] = (channelData[ch]||0) + pieces(o);
   }
   const topChannels = Object.entries(channelData).sort((a,b)=>b[1]-a[1]).slice(0,3);
@@ -1561,7 +1573,7 @@ function buildEmailHTML(data) {
         <h3>🛒 Top Canales de Venta</h3>
         ${topChannels.map(([channel, items]) => `
           <div class="stat-row">
-            <span class="stat-label">${channel.charAt(0).toUpperCase() + channel.slice(1)}:</span>
+            <span class="stat-label">${channel}:</span>
             <span class="stat-value">${items} items</span>
           </div>
         `).join('')}
