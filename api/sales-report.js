@@ -673,29 +673,40 @@ async function getLocationBreakdown(orders) {
   const locationStats = {};
   
   for (const order of orders) {
-    let locationName = 'Online';
-    
-    if (order.location_id) {
-      let location = globalCache.locations?.find(l => l.id === order.location_id);
-      if (!location) {
-        const result = await safeShopifyCall(
-          () => shopFetchJson(REST(`/locations/${order.location_id}.json`)),
-          `fetchLocation ${order.location_id} for breakdown`
-        );
-        
-        if (result?.location) {
-          location = result.location;
-          if (!globalCache.locations) globalCache.locations = [];
-          globalCache.locations.push(location);
-          locationName = location.name || `Location ${order.location_id}`;
+    // Determinar si es venta física (POS) por source_name, NO por location_id -
+    // ahora que solo hay 1 location, Shopify la asigna también como origen de
+    // fulfillment en pedidos online reales (confirmado en pedido #2869), así que
+    // location_id ya no sirve para distinguir "vendido en tienda" vs "vendido online".
+    const isPOS = order.source_name && order.source_name.toLowerCase().includes('pos');
+    let locationName;
+
+    if (isPOS) {
+      // Venta física real - identificar el nombre de la location de venta
+      if (order.location_id) {
+        let location = globalCache.locations?.find(l => l.id === order.location_id);
+        if (!location) {
+          const result = await safeShopifyCall(
+            () => shopFetchJson(REST(`/locations/${order.location_id}.json`)),
+            `fetchLocation ${order.location_id} for breakdown`
+          );
+
+          if (result?.location) {
+            location = result.location;
+            if (!globalCache.locations) globalCache.locations = [];
+            globalCache.locations.push(location);
+            locationName = location.name || `Location ${order.location_id}`;
+          } else {
+            locationName = `Location ${order.location_id}`;
+          }
         } else {
-          locationName = `Location ${order.location_id}`;
+          locationName = location.name || `Location ${order.location_id}`;
         }
       } else {
-        locationName = location.name || `Location ${order.location_id}`;
+        locationName = 'POS (Location Unknown)';
       }
-    } else if (order.source_name && order.source_name.toLowerCase().includes('pos')) {
-      locationName = 'POS (Location Unknown)';
+    } else {
+      // Venta online - independientemente de location_id (ahora es solo origen de fulfillment)
+      locationName = 'Online';
     }
 
     if (!locationStats[locationName]) {
@@ -711,6 +722,81 @@ async function getLocationBreakdown(orders) {
   }
 
   return locationStats;
+}
+
+// ========================================
+// BREAKDOWN VENTAS ONLINE POR ESTADO
+// ========================================
+// Nombres completos de los estados de México (para providencia code -> nombre)
+const MX_STATE_NAMES = {
+  "AGU": "Aguascalientes", "BCN": "Baja California", "BCS": "Baja California Sur",
+  "CAM": "Campeche", "CHP": "Chiapas", "CHH": "Chihuahua", "COA": "Coahuila",
+  "COL": "Colima", "DIF": "Ciudad de México", "DUR": "Durango", "GUA": "Guanajuato",
+  "GRO": "Guerrero", "HID": "Hidalgo", "JAL": "Jalisco", "MEX": "Estado de México",
+  "MIC": "Michoacán", "MOR": "Morelos", "NAY": "Nayarit", "NLE": "Nuevo León",
+  "OAX": "Oaxaca", "PUE": "Puebla", "QUE": "Querétaro", "ROO": "Quintana Roo",
+  "SLP": "San Luis Potosí", "SIN": "Sinaloa", "SON": "Sonora", "TAB": "Tabasco",
+  "TAM": "Tamaulipas", "TLA": "Tlaxcala", "VER": "Veracruz", "YUC": "Yucatán",
+  "ZAC": "Zacatecas"
+};
+
+function normalizeStateLabel(provinceCode, provinceName) {
+  if (provinceCode && MX_STATE_NAMES[provinceCode]) return MX_STATE_NAMES[provinceCode];
+  if (provinceName) return provinceName;
+  if (provinceCode) return provinceCode;
+  return "Sin datos";
+}
+
+/**
+ * Detecta si un pedido es "Retiro en tienda" (pickup) - cliente físico que
+ * prepaga en línea para asegurar el producto pero lo recoge en la farmacia.
+ * No es una venta "online" real a efectos de targeting geográfico.
+ */
+function isPickupOrder(order) {
+  const tags = (order.tags || '').toLowerCase();
+  if (tags.includes('pickup') || tags.includes('retiro en tienda')) return true;
+
+  const shippingLines = order.shipping_lines || [];
+  return shippingLines.some(sl => {
+    const title = (sl.title || sl.code || '').toLowerCase();
+    return title.includes('pickup') || title.includes('retiro en tienda') || title.includes('local pickup');
+  });
+}
+
+/**
+ * Agrupa las VENTAS ONLINE REALES (excluye POS/tienda física Y pickup en tienda,
+ * ya que ambos son clientes físicos que no necesitan envío) por estado de envío,
+ * usando shippingAddress.province_code como fuente principal (más fiable que
+ * billing address, que suele venir vacío en muchos pedidos de Shopify).
+ */
+async function getStateBreakdown(orders) {
+  const stateStats = {};
+
+  for (const order of orders) {
+    // Excluir SOLO ventas hechas físicamente en POS (source_name = 'pos') y
+    // pedidos de retiro en tienda. NO usamos order.location_id como criterio:
+    // Shopify lo asigna también a pedidos online reales como origen de fulfillment
+    // (confirmado en pedido #2869 - envío real a CDMX pero location_id = "Derma y Laser Valle"),
+    // así que basarnos en location_id excluiría erróneamente casi todas las ventas online.
+    const isPOS = order.source_name && order.source_name.toLowerCase().includes('pos');
+    if (isPOS || isPickupOrder(order)) continue;
+
+    const addr = order.shipping_address || order.customer?.default_address || null;
+    const stateLabel = normalizeStateLabel(addr?.province_code, addr?.province);
+
+    if (!stateStats[stateLabel]) {
+      stateStats[stateLabel] = { orders: 0, revenue: 0, items: 0 };
+    }
+
+    const revenue = getOrderRevenue(order);
+    const items = order.line_items.reduce((s, li) => s + Number(li.quantity || 0), 0);
+
+    stateStats[stateLabel].orders++;
+    stateStats[stateLabel].revenue += revenue;
+    stateStats[stateLabel].items += items;
+  }
+
+  return stateStats;
 }
 
 
@@ -1102,6 +1188,38 @@ function renderLocationBreakdown(locationStats, isEmail = false) {
   </div>`;
 }
 
+function renderStateBreakdown(stateStats, isEmail = false, limit = null) {
+  const states = Object.entries(stateStats).sort((a, b) => b[1].revenue - a[1].revenue);
+  if (!states.length) return '';
+
+  const totalRevenue = states.reduce((s, [, v]) => s + v.revenue, 0);
+  const maxRevenue = states[0][1].revenue || 1;
+  const displayStates = limit ? states.slice(0, limit) : states;
+  const barH = isEmail ? 8 : 10;
+  const fontMain = isEmail ? 11 : 12;
+  const fontSub = isEmail ? 10 : 11;
+
+  return `
+  <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:20px 0;">
+    <h3 style="margin:0 0 4px;color:#374151;font-size:${isEmail ? 14 : 16}px;">🗺️ Ventas Online por Estado${limit ? ` (Top ${limit})` : ''}</h3>
+    <div style="font-size:${fontSub}px;color:#9ca3af;margin-bottom:12px;">Solo canal online (excluye venta en farmacia física) · ${states.length} estado${states.length !== 1 ? 's' : ''} con ventas</div>
+    ${displayStates.map(([state, stats], i) => {
+      const pct = totalRevenue > 0 ? (stats.revenue / totalRevenue * 100) : 0;
+      const barWidth = (stats.revenue / maxRevenue * 100).toFixed(1);
+      return `
+      <div style="margin-bottom:${isEmail ? 8 : 10}px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:${fontMain}px;margin-bottom:2px;">
+          <span style="font-weight:600;color:#374151;">${i + 1}. ${esc(state)}</span>
+          <span style="color:#6b7280;font-size:${fontSub}px;">${money(stats.revenue)} · ${pct.toFixed(1)}% · ${stats.orders} órdenes</span>
+        </div>
+        <div style="background:#e5e7eb;border-radius:4px;height:${barH}px;overflow:hidden;">
+          <div style="background:${PALETTE[i % PALETTE.length]};height:100%;width:${barWidth}%;"></div>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
 function renderUsoInternoSection(rows, isEmail = false) {
   const usoInterno = rows.filter(r => r.revenue === 0 && r.soldQty > 0);
   if (!usoInterno.length) return '';
@@ -1414,7 +1532,7 @@ function styles(isEmail = false) {
 // TEMPLATE EMAIL SEMPLIFICATO COMPLETO
 // ========================================
 function buildEmailHTML(data) {
-  const { label, tz, now, rows, orders, timing, locationStats } = data;
+  const { label, tz, now, rows, orders, timing, locationStats, stateStats } = data;
   const totRev = orders.reduce((s, o) => s + getOrderRevenue(o), 0);
   const USE_GRAPHQL = process.env.USE_GRAPHQL === 'true';
   
@@ -1603,6 +1721,9 @@ function buildEmailHTML(data) {
       </div>
       ` : ''}
 
+      <!-- TOP 3 ESTADOS (VENTAS ONLINE) -->
+      ${stateStats && Object.keys(stateStats).length > 0 ? renderStateBreakdown(stateStats, true, 3) : ''}
+
       <!-- TOP 5 PRODUCTOS VENDIDOS -->
       <div class="section">
         <h3>🏆 Top 5 Productos Vendidos</h3>
@@ -1697,7 +1818,7 @@ function buildEmailHTML(data) {
 // ========================================
 function buildCompleteHTML(data, isEmail = false) {
   const { label, tz, now, rows, orders, conversions, comparison, timing, 
-          deadStockData, ropRows, abcData, includeAllLocations, locationStats, performanceStats } = data;
+          deadStockData, ropRows, abcData, includeAllLocations, locationStats, stateStats, performanceStats } = data;
   const totRev = orders.reduce((s, o) => s + getOrderRevenue(o), 0);
   const USE_GRAPHQL = process.env.USE_GRAPHQL === 'true';
 
@@ -1828,6 +1949,7 @@ function buildCompleteHTML(data, isEmail = false) {
 
     <!-- SECCIONES PRINCIPALES DEL REPORTE -->
     ${renderLocationBreakdown(locationStats, isEmailMode)}
+    ${stateStats ? renderStateBreakdown(stateStats, isEmailMode) : ''}
     ${!isEmailMode ? renderUsoInternoSection(rows) : ''}
     ${!isEmailMode ? renderStockCriticoVendidosSection(rows) : ''}
     ${renderDeadStockAlert(deadStockData, isEmailMode)}
@@ -1920,6 +2042,7 @@ export default async function handler(req, res) {
     
     const conversions = calculateConversions(orders);
     const locationStats = await getLocationBreakdown(orders);
+    const stateStats = await getStateBreakdown(orders);
     
     const reportDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
     const skipDeadStock = shouldSkipDeadStock(reportDays, variantIds.length);
@@ -2012,7 +2135,7 @@ export default async function handler(req, res) {
     const reportData = {
       success: true,
       label, tz, now, rows, orders, conversions, comparison, timing, 
-      deadStockData, ropRows, abcData, locationStats, performanceStats,
+      deadStockData, ropRows, abcData, locationStats, stateStats, performanceStats,
       includeAllLocations: includeAllLocations,
       stats: {
         totalProducts: rows.length,
